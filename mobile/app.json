@@ -1,0 +1,60 @@
+{
+  "expo": {
+    "name": "MobileCall",
+    "slug": "mobile-call",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.mobilecall",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow MobileCall to access your camera",
+        "NSMicrophoneUsageDescription": "Allow MobileCall to access your microphone"
+      },
+      "bitcode": false
+    },
+    "android": {
+      "package": "com.anonymous.mobilecall",
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "plugins": [
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow MobileCall to access your camera",
+          "microphonePermission": "Allow MobileCall to access your microphone"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "17242fbc-e74f-4d3f-83e5-a0b7c9c22cd6"
+      }
+    }
+  }
+}
