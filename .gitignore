@@ -1,0 +1,28 @@
+# Node.js
+node_modules/
+npm-debug.log
+pnpm-lock.yaml
+yarn-error.log
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Native folders (if prebuild is used)
+android/
+ios/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
