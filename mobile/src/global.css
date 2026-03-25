@@ -1,0 +1,53 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+/* Platform-specific font families */
+@media android {
+  :root {
+    --font-mono: monospace;
+    --font-rounded: normal;
+    --font-serif: serif;
+    --font-sans: normal;
+  }
+}
+
+@media ios {
+  :root {
+    --font-mono: ui-monospace;
+    --font-serif: ui-serif;
+    --font-sans: system-ui;
+    --font-rounded: ui-rounded;
+  }
+}
+
+:root {
+  /* Brand colors with light/dark mode */
+  --brand-primary: light-dark(rgba(59, 130, 246, 0.8), rgba(59, 130, 246, 0.9));
+  --brand-secondary: light-dark(rgba(139, 92, 246, 0.8), rgba(139, 92, 246, 0.9));
+  
+  /* Text colors */
+  --text-main: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));
+  --text-dim: light-dark(rgba(0, 0, 0, 0.6), rgba(255, 255, 255, 0.6));
+  
+  /* Background colors */
+  --bg-main: light-dark(rgb(255, 255, 255), rgb(15, 23, 42));
+  --bg-card: light-dark(rgba(255, 255, 255, 0.7), rgba(30, 41, 59, 0.7));
+  
+  /* Glassmorphism */
+  --glass-bg: light-dark(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+  --glass-border: light-dark(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.1));
+}
+
+@layer theme {
+  @theme {
+    --color-brand-primary: var(--brand-primary);
+    --color-brand-secondary: var(--brand-secondary);
+    --color-text-main: var(--text-main);
+    --color-text-dim: var(--text-dim);
+    --color-bg-main: var(--bg-main);
+    --color-bg-card: var(--bg-card);
+    --color-glass-bg: var(--glass-bg);
+    --color-glass-border: var(--glass-border);
+  }
+}
