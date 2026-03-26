@@ -24,6 +24,9 @@ if (Platform.OS === 'web') {
   RTCIceCandidate = window.RTCIceCandidate;
   RTCSessionDescription = window.RTCSessionDescription;
   mediaDevices = navigator.mediaDevices;
+  if (!mediaDevices) {
+    console.warn('navigator.mediaDevices is undefined. Insecure context?');
+  }
 } else {
   try {
     const WebRTC = require('react-native-webrtc');
@@ -91,7 +94,15 @@ export default function App() {
 
   const getBaseUrl = () => {
     if (!serverIP) return 'http://localhost:3000'; // Fallback
-    let sanitizedIP = serverIP.trim().replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+    
+    // Check if the user already specified a protocol
+    const trimmedIP = serverIP.trim();
+    if (trimmedIP.startsWith('http://') || trimmedIP.startsWith('https://')) {
+      return trimmedIP.endsWith('/') ? trimmedIP.slice(0, -1) : trimmedIP;
+    }
+    
+    // Fallback to http with port 3000
+    let sanitizedIP = trimmedIP.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
     return `http://${sanitizedIP}:3000`;
   };
 
@@ -250,7 +261,7 @@ export default function App() {
         socketRef.current?.emit('request-user-list', {});
       }, 1500);
       setIsJoined(true);
-      setView('main');
+      if (view === 'auth') setView('main');
     });
 
     socketRef.current.on('user-list', (list: User[]) => {
@@ -258,6 +269,7 @@ export default function App() {
     });
 
     socketRef.current.on('offer', async (data) => {
+      console.log('OFFER RECEIVED from:', data.fromName);
       setCallerName(data.fromName);
       setIsIncomingCall(true);
       setCallStatus('ringing');
@@ -343,17 +355,35 @@ export default function App() {
   };
 
   const startLocalStream = async (video: boolean) => {
-    if (!mediaDevices) return null;
+    console.log(`Starting local stream: video=${video}`);
+    
+    if (Platform.OS === 'web' && !window.isSecureContext) {
+      Alert.alert(
+        'Insecure Context', 
+        'Browsers block camera/mic access on insecure origins. Use "localhost" or "https://" to test.'
+      );
+      return null;
+    }
+
+    if (!mediaDevices) {
+      console.error('mediaDevices not available');
+      return null;
+    }
+
     try {
-      const stream = await mediaDevices.getUserMedia({
+      const constraints = {
         audio: true,
         video: video ? { facingMode: 'user' } : false,
-      });
+      };
+      console.log('Requesting getUserMedia with:', constraints);
+      const stream = await mediaDevices.getUserMedia(constraints);
+      console.log('Stream acquired successfully');
       localStreamRef.current = stream;
       setLocalStream(stream);
       return stream;
-    } catch (e) {
-      Alert.alert('Permission Error', 'Cannot access camera or microphone');
+    } catch (e: any) {
+      console.error('getUserMedia error:', e);
+      Alert.alert('Permission Error', `Cannot access camera or microphone: ${e.message}`);
       return null;
     }
   };
@@ -369,22 +399,31 @@ export default function App() {
   };
 
   const initiateCall = async (targetId: string, targetName: string, video: boolean) => {
-    if (!isVoipEligible) {
-      Alert.alert('Ineligible', 'You are not eligible for VoIP calls.');
-      return;
-    }
-    setCallStatus('calling');
-    setCallerName(targetName);
-    remoteSocketIdRef.current = targetId;
-    setIsVideoEnabled(video);
-    setView('call');
+    try {
+      setCallStatus('calling');
+      setCallerName(targetName);
+      remoteSocketIdRef.current = targetId;
+      setIsVideoEnabled(video);
+      setView('call');
 
-    const stream = await startLocalStream(video);
-    if (!stream) return;
-    setupPeerConnection(targetId, stream);
-    const offer = await peerConnectionRef.current.createOffer();
-    await peerConnectionRef.current.setLocalDescription(offer);
-    socketRef.current?.emit('offer', { to: targetId, offer, isVideo: video });
+      const stream = await startLocalStream(video);
+      if (!stream) return;
+      
+      if (!RTCPeerConnection) {
+        Alert.alert('WebRTC Error', 'WebRTC native module not found. Are you in Expo Go? Use a development client.');
+        endCall(false);
+        return;
+      }
+
+      setupPeerConnection(targetId, stream);
+      const offer = await peerConnectionRef.current.createOffer();
+      await peerConnectionRef.current.setLocalDescription(offer);
+      socketRef.current?.emit('offer', { to: targetId, offer, isVideo: video });
+    } catch (e: any) {
+      console.error('Call Error:', e);
+      Alert.alert('Call Failed', e.message || 'Could not initiate call');
+      endCall(false);
+    }
   };
 
   const acceptCall = async () => {
@@ -398,6 +437,12 @@ export default function App() {
     const stream = await startLocalStream(data.isVideo);
     if (!stream) {
       socketRef.current?.emit('call-rejected', { to: data.from });
+      endCall(false);
+      return;
+    }
+
+    if (!RTCPeerConnection) {
+      Alert.alert('WebRTC Error', 'WebRTC native module not found.');
       endCall(false);
       return;
     }
@@ -470,6 +515,10 @@ export default function App() {
       <Pressable onPress={() => setView('profile')} className="items-center justify-center">
         <MaterialIcons name="person" size={24} color={view === 'profile' ? '#9333EA' : '#666'} />
         <Text className={`text-[10px] mt-1 ${view === 'profile' ? 'text-purple-400 font-bold' : 'text-text-dim'}`}>Profile</Text>
+      </Pressable>
+      <Pressable onPress={() => handleJoin()} className="items-center justify-center">
+        <MaterialIcons name="sync" size={24} color={isJoined ? '#10B981' : '#666'} />
+        <Text className={`text-[10px] mt-1 ${isJoined ? 'text-emerald-400' : 'text-text-dim'}`}>Sync</Text>
       </Pressable>
     </View>
   );
@@ -576,6 +625,15 @@ export default function App() {
         <ScrollView className="flex-1">
           {view === 'main' && (
             <View className="p-5">
+              {Platform.OS === 'web' && !window.isSecureContext && (
+                <View className="p-4 bg-amber-900/40 rounded-2xl mb-5 border border-amber-800">
+                  <Text className="text-amber-300 font-bold mb-1">Insecure Context (HTTP)</Text>
+                  <Text className="text-amber-200 text-xs">
+                    Browsers block Camera/Mic access on insecure connections. 
+                    Please use "localhost" or an HTTPS address to enable calls.
+                  </Text>
+                </View>
+              )}
               <Text className="text-2xl font-bold mb-5 text-text-main">Online Family Members</Text>
               {users.length === 0 ? (
                 <Text className="text-center mt-12 text-gray-500">No one else is online in your family.</Text>

@@ -64,7 +64,18 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Explicitly using async_mode='threading' for compatibility with Python 3.13
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', manage_session=False, logger=True, engineio_logger=True)
+# Optimized for Cloudflare Tunneling (Higher ping timeout, allow_upgrades for WebSockets)
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading', 
+    manage_session=False, 
+    logger=True, 
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25,
+    allow_upgrades=True
+)
 
 users = {} # {socket_id: username}
 image_processor = ImageProcessingService()
@@ -97,7 +108,7 @@ def register():
     sub_status = 'basic'
     role = 'standard'
     family_id = None
-    is_eligible = 0
+    is_eligible = 1
 
     is_successful = add_new_user(uName, passW, age, sub_status, is_eligible, role, family_id)
 
@@ -462,16 +473,19 @@ def handle_join(data):
     # data can be a token or just the family_id if already authenticated
     token = data.get('token')
     if not token:
+        print("[JOIN] Failed: No token provided")
         return
     try:
         decoded = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
         username = decoded['user']
         user_row = get_user(username)
         if not user_row:
+            print(f"[JOIN] Failed: User {username} not found in DB")
             return
         
         family_id = user_row['family_id']
         if not family_id:
+            print(f"[JOIN] Failed: User {username} has no family_id")
             return
 
         room = f"family_{family_id}"
@@ -498,32 +512,47 @@ def handle_request_user_list(data):
 def handle_offer(data):
     target_to = data.get('to')
     user_info = users.get(request.sid)
-    if not user_info:
+    sender_name = user_info['name'] if user_info else "Unknown"
+    
+    print(f"[OFFER] From: {sender_name} ({request.sid}) -> To: {target_to}")
+    
+    if target_to not in users:
+        print(f"[OFFER] Error: Target {target_to} not in active users list")
+        print(f"Current connected IDs: {list(users.keys())}")
         return
-    sender_name = user_info['name']
-    print(f"[OFFER] from {sender_name} to {target_to}")
+
     emit('offer', {
         'from': request.sid,
         'fromName': sender_name,
         'offer': data.get('offer'),
         'isVideo': data.get('isVideo')
     }, to=target_to)
+    print(f"[OFFER] Emitted to {target_to}")
 
 @socketio.on('answer')
 def handle_answer(data):
-    emit('answer', {'from': request.sid, 'answer': data.get('answer')}, to=data.get('to'))
+    target_to = data.get('to')
+    print(f"[ANSWER] From: {request.sid} -> To: {target_to}")
+    emit('answer', {'from': request.sid, 'answer': data.get('answer')}, to=target_to)
 
 @socketio.on('ice-candidate')
 def handle_ice_candidate(data):
-    emit('ice-candidate', {'from': request.sid, 'candidate': data.get('candidate')}, to=data.get('to'))
+    target_to = data.get('to')
+    # Too many candidates to log all, but log the first few
+    # print(f"[ICE] From: {request.sid} -> To: {target_to}")
+    emit('ice-candidate', {'from': request.sid, 'candidate': data.get('candidate')}, to=target_to)
 
 @socketio.on('call-rejected')
 def handle_call_rejected(data):
-    emit('call-rejected', {'from': request.sid}, to=data.get('to'))
+    target_to = data.get('to')
+    print(f"[REJECTED] From: {request.sid} -> To: {target_to}")
+    emit('call-rejected', {'from': request.sid}, to=target_to)
 
 @socketio.on('end-call')
 def handle_end_call(data):
-    emit('end-call', {'from': request.sid}, to=data.get('to'))
+    target_to = data.get('to')
+    print(f"[END-CALL] From: {request.sid} -> To: {target_to}")
+    emit('end-call', {'from': request.sid}, to=target_to)
 
 @socketio.on('disconnect')
 def handle_disconnect():

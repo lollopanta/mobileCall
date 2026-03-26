@@ -34,7 +34,7 @@ def init_db():
             family_id INTEGER,
             age INTEGER,
             subscription_status TEXT,
-            is_voip_eligible BOOLEAN DEFAULT 0,
+            is_voip_eligible BOOLEAN DEFAULT 1,
             profile_image TEXT,
             FOREIGN KEY (family_id) REFERENCES families (id)
         )
@@ -57,7 +57,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_new_user(username, password, age=None, sub_status=None, is_eligible=0, role='standard', family_id=None):
+def add_new_user(username, password, age=None, sub_status=None, is_eligible=1, role='standard', family_id=None):
     conn = get_connection()
     cursor = conn.cursor()
 

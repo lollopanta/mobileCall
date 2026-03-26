@@ -18,7 +18,7 @@ def migrate():
         'family_id': "INTEGER",
         'age': "INTEGER",
         'subscription_status': "TEXT",
-        'is_voip_eligible': "BOOLEAN DEFAULT 0"
+        'is_voip_eligible': "BOOLEAN DEFAULT 1"
     }
 
     for col, definition in missing_columns.items():
