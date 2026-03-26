@@ -10,6 +10,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
 import axios from 'axios';
+import { Audio } from 'expo-av';
 
 // --- PLATFORM CONDITIONAL WEBRTC IMPORTS ---
 let RTCPeerConnection: any;
@@ -89,8 +90,53 @@ export default function App() {
   const remoteSocketIdRef = useRef<string | null>(null);
   const offerDataRef = useRef<any>(null);
 
+  const soundRef = useRef<Audio.Sound | null>(null);
+
   const localVideoRef = useRef<any>(null);
   const remoteVideoRef = useRef<any>(null);
+
+  const playRingtone = async () => {
+    try {
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync();
+      }
+      
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
+      });
+
+      const { sound } = await Audio.Sound.createAsync(
+        require('./assets/audio/Ringtone.mp3'),
+        { shouldPlay: true, isLooping: true }
+      );
+      soundRef.current = sound;
+      await sound.playAsync();
+    } catch (error) {
+      console.warn('Error playing ringtone:', error);
+    }
+  };
+
+  const stopRingtone = async () => {
+    try {
+      if (soundRef.current) {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+    } catch (error) {
+      console.warn('Error stopping ringtone:', error);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync();
+      }
+    };
+  }, []);
 
   const getBaseUrl = () => {
     if (!serverIP) return 'http://localhost:3000'; // Fallback
@@ -276,12 +322,14 @@ export default function App() {
       remoteSocketIdRef.current = data.from;
       offerDataRef.current = data;
       setView('call');
+      playRingtone();
     });
 
     socketRef.current.on('answer', async (data) => {
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
         setCallStatus('connected');
+        stopRingtone();
       }
     });
 
@@ -295,10 +343,14 @@ export default function App() {
 
     socketRef.current.on('call-rejected', () => {
       Alert.alert('Rejected', 'Call was declined');
+      stopRingtone();
       endCall(false);
     });
 
-    socketRef.current.on('end-call', () => endCall(false));
+    socketRef.current.on('end-call', () => {
+      stopRingtone();
+      endCall(false);
+    });
   };
 
   const pickImage = async () => {
@@ -399,15 +451,23 @@ export default function App() {
   };
 
   const initiateCall = async (targetId: string, targetName: string, video: boolean) => {
+    if (!isVoipEligible) {
+      Alert.alert('Ineligible', 'You are not eligible for VoIP calls.');
+      return;
+    }
     try {
       setCallStatus('calling');
       setCallerName(targetName);
       remoteSocketIdRef.current = targetId;
       setIsVideoEnabled(video);
       setView('call');
+      playRingtone();
 
       const stream = await startLocalStream(video);
-      if (!stream) return;
+      if (!stream) {
+        stopRingtone();
+        return;
+      }
       
       if (!RTCPeerConnection) {
         Alert.alert('WebRTC Error', 'WebRTC native module not found. Are you in Expo Go? Use a development client.');
@@ -422,6 +482,7 @@ export default function App() {
     } catch (e: any) {
       console.error('Call Error:', e);
       Alert.alert('Call Failed', e.message || 'Could not initiate call');
+      stopRingtone();
       endCall(false);
     }
   };
@@ -433,6 +494,7 @@ export default function App() {
     setIsIncomingCall(false);
     setCallStatus('connected');
     remoteSocketIdRef.current = data.from;
+    stopRingtone();
 
     const stream = await startLocalStream(data.isVideo);
     if (!stream) {
@@ -473,6 +535,8 @@ export default function App() {
       socketRef.current?.emit('end-call', { to: remoteSocketIdRef.current });
     }
     
+    stopRingtone();
+
     if (peerConnectionRef.current) { 
       peerConnectionRef.current.close(); 
       peerConnectionRef.current = null; 
@@ -767,4 +831,3 @@ export default function App() {
     </SafeAreaView>
   );
 }
-
