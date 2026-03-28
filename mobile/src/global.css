@@ -22,21 +22,40 @@
 }
 
 :root {
-  /* Brand colors with light/dark mode */
-  --brand-primary: light-dark(rgba(59, 130, 246, 0.8), rgba(59, 130, 246, 0.9));
-  --brand-secondary: light-dark(rgba(139, 92, 246, 0.8), rgba(139, 92, 246, 0.9));
+  /* Brand colors */
+  --brand-primary: rgb(59, 130, 246);
+  --brand-secondary: rgb(139, 92, 246);
   
   /* Text colors */
-  --text-main: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));
-  --text-dim: light-dark(rgba(0, 0, 0, 0.6), rgba(255, 255, 255, 0.6));
+  --text-main: rgb(0, 0, 0);
+  --text-dim: rgb(100, 116, 139);
   
   /* Background colors */
-  --bg-main: light-dark(rgb(255, 255, 255), rgb(15, 23, 42));
-  --bg-card: light-dark(rgba(255, 255, 255, 0.7), rgba(30, 41, 59, 0.7));
+  --bg-main: rgb(255, 255, 255);
+  --bg-card: rgb(248, 250, 252);
   
-  /* Glassmorphism */
-  --glass-bg: light-dark(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
-  --glass-border: light-dark(rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.1));
+  /* Borders and Glass */
+  --glass-bg: rgba(255, 255, 255, 0.1);
+  --glass-border: rgb(226, 232, 240);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand-primary: rgb(96, 165, 250);
+    --brand-secondary: rgb(167, 139, 250);
+    
+    /* Text colors */
+    --text-main: rgb(255, 255, 255);
+    --text-dim: rgb(148, 163, 184);
+    
+    /* Background colors */
+    --bg-main: rgb(15, 23, 42);
+    --bg-card: rgb(30, 41, 59);
+    
+    /* Borders and Glass */
+    --glass-bg: rgba(255, 255, 255, 0.05);
+    --glass-border: rgb(51, 65, 85);
+  }
 }
 
 @layer theme {

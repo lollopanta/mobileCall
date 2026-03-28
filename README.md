@@ -33,7 +33,7 @@ Navigate to the `server` directory and install dependencies:
 cd server
 pip install -r requirements.txt
 python setupDB.py  # Initialize database
-python flaskr/app.py
+python fastapi/app.py
 ```
 > [!NOTE]
 > The server runs on port `3000` by default. Ensure your firewall allows incoming traffic on this port for LAN testing.

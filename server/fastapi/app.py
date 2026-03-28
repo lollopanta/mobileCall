@@ -499,5 +499,5 @@ sio_asgi_app = socketio.ASGIApp(sio, app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("flaskr.app:sio_asgi_app", host="0.0.0.0", port=3000, reload=False)
+    uvicorn.run("fastapi.app:sio_asgi_app", host="0.0.0.0", port=3000, reload=False)
 

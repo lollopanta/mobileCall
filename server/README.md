@@ -61,11 +61,11 @@ To start the signaling server with WebSocket support, run:
 
 ```bash
 # Windows & Linux
-python flaskr/app.py
+python fastapi/app.py
 ```
 
 > [!IMPORTANT]
-> **Do not use `flask run`**. Standard Flask development servers do not support the persistent WebSocket upgrades required for WebRTC. Always use `python flaskr/app.py`.
+> **Do not use `flask run`**. Standard Flask development servers do not support the persistent WebSocket upgrades required for WebRTC. Always use `python fastapi/app.py`.
 
 The server will be available at:
 -   **Local**: `http://127.0.0.1:3000`

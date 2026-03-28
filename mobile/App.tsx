@@ -3,6 +3,7 @@ import {
   Platform,
   Alert,
   Switch,
+  useColorScheme,
 } from 'react-native';
 import { View, Text, TextInput, Pressable, ScrollView, Image, SafeAreaView } from './src/tw';
 import { io, Socket } from 'socket.io-client';
@@ -11,6 +12,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
 import axios from 'axios';
 import { Audio } from 'expo-av';
+import { StatusBar } from 'expo-status-bar';
 
 // --- PLATFORM CONDITIONAL WEBRTC IMPORTS ---
 let RTCPeerConnection: any;
@@ -49,6 +51,7 @@ const iceServers = {
 type User = { id: string; name: string; is_voip_eligible?: boolean };
 
 export default function App() {
+  const colorScheme = useColorScheme();
   const [view, setView] = useState<'auth' | 'main' | 'call' | 'upload' | 'profile' | 'family' | 'notifications'>('auth');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
@@ -73,6 +76,7 @@ export default function App() {
   const [isIncomingCall, setIsIncomingCall] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isMicEnabled, setIsMicEnabled] = useState(true);
+  const [callDuration, setCallDuration] = useState(0);
 
   // Image Processing State
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -219,6 +223,28 @@ export default function App() {
       if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [localStream, remoteStream, callStatus]);
+
+  useEffect(() => {
+    let interval: any;
+    if (callStatus === 'connected') {
+      setCallDuration(0);
+      interval = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    } else {
+      setCallDuration(0);
+      if (interval) clearInterval(interval);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [callStatus]);
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const handleAuth = async () => {
     const baseUrl = getBaseUrl();
@@ -590,20 +616,22 @@ export default function App() {
   if (view === 'auth') {
     return (
       <SafeAreaView className="flex-1 bg-bg-main">
+        <StatusBar style="auto" />
         <ScrollView contentContainerClassName="flex-grow justify-center items-center p-5">
           <Text className="text-4xl font-bold mb-2 text-text-main text-center">MobileCall</Text>
           
           <TextInput
-            placeholder="Server IP (e.g. 192.168.1.5)"
+            placeholder="Server Address (e.g. 192.168.1.5 or my.server.com)"
             className="w-full p-4 bg-bg-card rounded-xl mb-3 border border-glass-border text-base text-text-main"
             value={serverIP}
             onChangeText={setServerIP}
-            keyboardType="numeric"
+            autoCapitalize="none"
+            autoCorrect={false}
             placeholderTextColor="#666"
           />
 
           <Pressable 
-            className={`p-4 rounded-xl items-center w-full mb-5 border border-glass-border ${isScanning ? 'bg-gray-800' : 'bg-emerald-600'}`}
+            className={`p-4 rounded-xl items-center w-full mb-5 border border-glass-border ${isScanning ? 'bg-bg-card' : 'bg-emerald-600'}`}
             onPress={autoDiscoverServer}
             disabled={isScanning}
           >
@@ -643,10 +671,14 @@ export default function App() {
 
   if (view === 'call') {
     return (
-      <SafeAreaView className="flex-1 bg-black">
+      <SafeAreaView className="flex-1 bg-bg-main">
+        <StatusBar style="auto" />
         <View className="flex-grow justify-center items-center p-5">
-          <Text className="text-white text-2xl">{isIncomingCall ? 'Incoming Call from' : 'Calling...'}</Text>
-          <Text className="text-white text-3xl font-bold">{callerName}</Text>
+          <Text className="text-text-main text-2xl">{isIncomingCall ? 'Incoming Call from' : 'Calling...'}</Text>
+          <Text className="text-text-main text-3xl font-bold">{callerName}</Text>
+          {callStatus === 'connected' && (
+            <Text className="text-purple-400 text-xl font-bold mt-2">{formatDuration(callDuration)}</Text>
+          )}
           {callStatus === 'ringing' || isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
               {isIncomingCall && (
@@ -677,12 +709,13 @@ export default function App() {
 
   return (
     <SafeAreaView className="flex-1 bg-bg-main">
+      <StatusBar style="auto" />
       <View className="flex-1">
         {/* Header */}
-        <View className="p-5 pt-10 bg-black flex-row justify-between items-center border-b border-gray-800">
-          <Text className="text-white text-xl font-bold tracking-widest">{view.toUpperCase()}</Text>
+        <View className="p-5 pt-10 bg-bg-card flex-row justify-between items-center border-b border-glass-border">
+          <Text className="text-text-main text-xl font-bold tracking-widest">{view.toUpperCase()}</Text>
           <Pressable onPress={() => { setAuthToken(null); setView('auth'); }}>
-            <MaterialIcons name="logout" size={24} color="#fff" />
+            <MaterialIcons name="logout" size={24} color={colorScheme === 'dark' ? '#fff' : '#000'} />
           </Pressable>
         </View>
 
@@ -700,10 +733,10 @@ export default function App() {
               )}
               <Text className="text-2xl font-bold mb-5 text-text-main">Online Family Members</Text>
               {users.length === 0 ? (
-                <Text className="text-center mt-12 text-gray-500">No one else is online in your family.</Text>
+                <Text className="text-center mt-12 text-text-dim">No one else is online in your family.</Text>
               ) : (
                 users.map((item) => (
-                  <View key={item.id} className="p-4 rounded-2xl bg-bg-card mb-3 flex-row justify-between items-center border border-gray-800">
+                  <View key={item.id} className="p-4 rounded-2xl bg-bg-card mb-3 flex-row justify-between items-center border border-glass-border">
                     <Text className="text-lg font-medium text-text-main">{item.name}</Text>
                     <View className="flex-row">
                       <Pressable onPress={() => initiateCall(item.id, item.name, false)} className="p-3 rounded-xl ml-2.5 bg-emerald-500">
@@ -725,18 +758,18 @@ export default function App() {
                 <View className="w-24 h-24 rounded-full bg-purple-600 justify-center items-center mb-4">
                   <Text className="text-white text-4xl font-bold">{(userProfile?.username || 'U')[0].toUpperCase()}</Text>
                 </View>
-                <Text className="text-2xl font-bold text-white">{userProfile?.username}</Text>
+                <Text className="text-2xl font-bold text-text-main">{userProfile?.username}</Text>
                 <Text className="text-text-dim">{userProfile?.role || 'No Role Set'}</Text>
               </View>
 
-              <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-gray-800">
-                <Text className="text-lg font-bold mb-4 text-white">Update Profile</Text>
+              <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                <Text className="text-lg font-bold mb-4 text-text-main">Update Profile</Text>
                 <View className="mb-5">
                   <Text className="text-sm text-text-dim mb-2.5">Role</Text>
                   <View className="flex-row gap-2.5">
                     {['caregiver', 'grandparent'].map(r => (
-                      <Pressable key={r} onPress={() => setUserProfile({...userProfile, role: r})} className={`flex-1 p-3 rounded-xl border items-center ${userProfile?.role === r ? 'bg-purple-600 border-purple-700' : 'bg-gray-900 border-gray-800'}`}>
-                        <Text className={userProfile?.role === r ? 'text-white' : 'text-gray-500'}>{r.charAt(0).toUpperCase() + r.slice(1)}</Text>
+                      <Pressable key={r} onPress={() => setUserProfile({...userProfile, role: r})} className={`flex-1 p-3 rounded-xl border items-center ${userProfile?.role === r ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}>
+                        <Text className={userProfile?.role === r ? 'text-white' : 'text-text-dim'}>{r.charAt(0).toUpperCase() + r.slice(1)}</Text>
                       </Pressable>
                     ))}
                   </View>
@@ -757,8 +790,8 @@ export default function App() {
           {view === 'family' && (
             <View className="p-5">
               {!userProfile?.family_id ? (
-                <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-gray-800">
-                  <Text className="text-lg font-bold mb-4 text-white">Join a Family</Text>
+                <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                  <Text className="text-lg font-bold mb-4 text-text-main">Join a Family</Text>
                   <Text className="mb-5 text-text-dim">You are not in a family yet. Create one or wait for an invite.</Text>
                   <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
                     const baseUrl = getBaseUrl();
@@ -773,16 +806,16 @@ export default function App() {
               ) : (
                 <>
                   <View className="flex-row justify-between items-center mb-5">
-                    <Text className="text-2xl font-bold text-white">Family Members</Text>
+                    <Text className="text-2xl font-bold text-text-main">Family Members</Text>
                     <Pressable onPress={pickImage} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
                       <MaterialIcons name="add-a-photo" size={24} color="#D8B4FE" />
                     </Pressable>
                   </View>
                   {familyMembers.map((m, i) => (
-                    <View key={i} className="flex-row items-center p-4 bg-bg-card rounded-2xl mb-2.5 border border-gray-800">
+                    <View key={i} className="flex-row items-center p-4 bg-bg-card rounded-2xl mb-2.5 border border-glass-border">
                        <MaterialIcons name="person" size={24} color="#D8B4FE" />
                        <View className="ml-3 flex-1">
-                         <Text className="font-bold text-white">{m.username}</Text>
+                         <Text className="font-bold text-text-main">{m.username}</Text>
                          <Text className="text-xs text-text-dim capitalize">{m.role}</Text>
                        </View>
                     </View>
@@ -794,13 +827,13 @@ export default function App() {
 
           {view === 'notifications' && (
             <View className="p-5">
-              <Text className="text-2xl font-bold mb-5 text-white">Invitations</Text>
+              <Text className="text-2xl font-bold mb-5 text-text-main">Invitations</Text>
               {pendingInvitations.length === 0 ? (
-                <Text className="text-center mt-10 text-gray-500">No new invitations.</Text>
+                <Text className="text-center mt-10 text-text-dim">No new invitations.</Text>
               ) : (
                 pendingInvitations.map((inv, i) => (
-                  <View key={i} className="p-5 bg-bg-card rounded-2xl mb-5 border border-gray-800">
-                    <Text className="font-bold text-white">Family Invite</Text>
+                  <View key={i} className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                    <Text className="font-bold text-text-main">Family Invite</Text>
                     <Text className="my-2 text-text-dim">You have been invited to join the {inv.family_name} family.</Text>
                     <View className="flex-row gap-2.5">
                       <Pressable className="flex-1 p-3 rounded-xl bg-emerald-500 items-center justify-center" onPress={async () => {
