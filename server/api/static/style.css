@@ -147,6 +147,24 @@ label {
     border-color: var(--secondary);
 }
 
+.btn-timeout {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--glass-border);
+    color: var(--text-muted);
+    padding: 10px;
+    border-radius: 10px;
+    cursor: pointer;
+    flex: 1;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: all 0.2s ease;
+}
+
+.btn-timeout:hover {
+    background: var(--glass-hover);
+    color: var(--text);
+}
+
 /* Specific component styles */
 .avatar {
     width: 80px;

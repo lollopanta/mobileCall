@@ -15,6 +15,32 @@
 
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; margin-bottom: 24px;">
             <h3 style="display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px;">
+                Ambient Mode Settings
+            </h3>
+            <form id="settingsForm" style="display: flex; flex-direction: column; gap: 15px;">
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="font-size: 0.8rem; color: var(--text-muted); padding-left: 4px;">Google Photos Album URL</label>
+                    <input type="text" id="albumUrl" class="inputField" placeholder="Paste shared album link here..." style="flex: 1; margin-top: 0;">
+                </div>
+                
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="font-size: 0.8rem; color: var(--text-muted); padding-left: 4px;">Idle Timeout (minutes)</label>
+                    <div style="display: flex; gap: 10px;">
+                        <button type="button" class="btn-timeout" onclick="setTimeoutValue(2)">2m</button>
+                        <button type="button" class="btn-timeout" onclick="setTimeoutValue(5)">5m</button>
+                        <button type="button" class="btn-timeout" onclick="setTimeoutValue(10)">10m</button>
+                        <button type="button" class="btn-timeout" onclick="setTimeoutValue(15)">15m</button>
+                        <input type="hidden" id="idleTimeout" value="5">
+                    </div>
+                </div>
+
+                <button type="submit" class="submitButton" style="width: auto; margin-top: 10px; padding: 0 24px; align-self: flex-start;">Save Settings</button>
+            </form>
+            <p id="settingsMessage" style="font-size: 0.8rem; margin-top: 12px; display: none;"></p>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; margin-bottom: 24px;">
+            <h3 style="display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px;">
                 Invite Members
             </h3>
             <form id="inviteForm" style="display: flex; gap: 10px;">
@@ -39,6 +65,62 @@
 
     <script>
         const token = localStorage.getItem('auth_token');
+
+        function setTimeoutValue(val) {
+            document.getElementById('idleTimeout').value = val;
+            document.querySelectorAll('.btn-timeout').forEach(btn => {
+                if (parseInt(btn.innerText) === val) {
+                    btn.style.background = 'var(--purple)';
+                    btn.style.borderColor = 'var(--purple-dark)';
+                    btn.style.color = 'white';
+                } else {
+                    btn.style.background = 'rgba(255,255,255,0.05)';
+                    btn.style.borderColor = 'var(--glass-border)';
+                    btn.style.color = 'var(--text-muted)';
+                }
+            });
+        }
+
+        async function loadSettings() {
+            try {
+                const res = await fetch('/api/family/settings', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await res.json();
+                if (data.status === 'successful' && data.settings) {
+                    document.getElementById('albumUrl').value = data.settings.google_photos_album_url || '';
+                    setTimeoutValue(data.settings.idle_timeout || 5);
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        document.getElementById('settingsForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const albumUrl = document.getElementById('albumUrl').value;
+            const idleTimeout = parseInt(document.getElementById('idleTimeout').value);
+            const msg = document.getElementById('settingsMessage');
+
+            msg.style.display = 'block';
+            msg.innerText = 'Saving...';
+
+            try {
+                const res = await fetch('/api/family/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ google_photos_album_url: albumUrl, idle_timeout: idleTimeout })
+                });
+                const data = await res.json();
+                msg.innerText = data.message;
+                msg.style.color = data.status === 'successful' ? 'var(--success)' : 'var(--danger)';
+                setTimeout(() => { msg.style.display = 'none'; }, 3000);
+            } catch (e) {
+                msg.innerText = 'Error saving settings';
+                msg.style.color = 'var(--danger)';
+            }
+        };
 
         async function loadMembers() {
             const listDiv = document.getElementById('membersList');
@@ -91,7 +173,10 @@
             }
         };
 
-        if (token) loadMembers();
+        if (token) {
+            loadMembers();
+            loadSettings();
+        }
     </script>
 </body>
 </html>

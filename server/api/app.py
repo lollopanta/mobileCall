@@ -413,7 +413,20 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
 
 @app.get("/api/profile")
 async def get_profile(current_user = Depends(get_current_user)):
-    return {"status": "successful", "user": current_user}
+    loop = asyncio.get_event_loop()
+    def _is_admin():
+        if not current_user['family_id']: return False
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT admin_id FROM families WHERE id = ?', (current_user['family_id'],))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] == current_user['id'] if row else False
+    
+    is_admin = await loop.run_in_executor(None, _is_admin)
+    user_data = dict(current_user)
+    user_data['is_family_admin'] = is_admin
+    return {"status": "successful", "user": user_data}
 
 @app.post("/api/profile/upload-direct")
 async def upload_profile_photo_direct(image: UploadFile = File(...), current_user = Depends(get_current_user)):

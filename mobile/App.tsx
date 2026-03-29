@@ -978,7 +978,7 @@ export default function App() {
                   <View className="flex-row justify-between items-center mb-5">
                     <Text className="text-2xl font-bold text-text-main">Family Members</Text>
                     <View className="flex-row gap-2.5">
-                      {(userProfile?.role === 'admin' || userProfile?.role === 'caregiver') && (
+                      {(userProfile?.role === 'admin' || userProfile?.role === 'caregiver' || userProfile?.is_family_admin) && (
                         <Pressable onPress={() => setView('family_settings')} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
                           <MaterialIcons name="settings" size={24} color="#D8B4FE" />
                         </Pressable>
