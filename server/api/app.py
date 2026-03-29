@@ -22,8 +22,8 @@ from werkzeug.utils import secure_filename
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from setupDB import add_new_user, get_user, update_profile_image, get_connection
-from flaskr.services.eligibility_service import EligibilityService
-from flaskr.services.image_service import ImageProcessingService
+from api.services.eligibility_service import EligibilityService
+from api.services.image_service import ImageProcessingService
 
 # --- Configuration ---
 SECRET_KEY = 'super_secret_key_change_this_later'
@@ -182,6 +182,8 @@ async def logout():
 async def create_family(request: Request, current_user = Depends(get_current_user)):
     data = await request.json()
     family_name = data.get('name')
+    admin_role = data.get('role', 'admin') # Default to admin if not provided
+    
     if not family_name:
         return JSONResponse({"status": "unsuccessful", "message": "Family name required"}, status_code=400)
 
@@ -192,7 +194,7 @@ async def create_family(request: Request, current_user = Depends(get_current_use
         try:
             cursor.execute('INSERT INTO families (name, admin_id) VALUES (?, ?)', (family_name, current_user['id']))
             family_id = cursor.lastrowid
-            cursor.execute('UPDATE users SET family_id = ?, role = ? WHERE id = ?', (family_id, 'admin', current_user['id']))
+            cursor.execute('UPDATE users SET family_id = ?, role = ? WHERE id = ?', (family_id, admin_role, current_user['id']))
             conn.commit()
             return family_id
         finally:
@@ -318,23 +320,26 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
 async def get_profile(current_user = Depends(get_current_user)):
     return {"status": "successful", "user": current_user}
 
-@app.post("/api/profile/update")
-async def update_profile(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
-    role = data.get('role')
-    age = data.get('age')
+@app.post("/api/profile/upload-direct")
+async def upload_profile_photo_direct(image: UploadFile = File(...), current_user = Depends(get_current_user)):
+    username = current_user['username']
+    extension = image.filename.split('.')[-1] if '.' in image.filename else 'jpg'
+    filename = f"{username}_profile.{extension}"
+    output_path = os.path.join(UPLOAD_FOLDER, filename)
+    
+    async with aiofiles.open(output_path, "wb") as buffer:
+        await buffer.write(await image.read())
+
     loop = asyncio.get_event_loop()
-    def _update():
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            if role: cursor.execute('UPDATE users SET role = ? WHERE id = ?', (role, current_user['id']))
-            if age: cursor.execute('UPDATE users SET age = ? WHERE id = ?', (age, current_user['id']))
-            conn.commit()
-        finally:
-            conn.close()
-    await loop.run_in_executor(None, _update)
-    return {"status": "successful", "message": "Profile updated"}
+    try:
+        await loop.run_in_executor(None, update_profile_image, username, f"/static/uploads/{filename}")
+        return {
+            "status": "successful",
+            "message": "Profile image updated",
+            "profile_image": f"/static/uploads/{filename}"
+        }
+    except Exception as e:
+        return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
 
 @app.post("/upload-image")
 async def upload_image(image: UploadFile = File(...), username: str = Form(...)):
@@ -499,5 +504,5 @@ sio_asgi_app = socketio.ASGIApp(sio, app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("fastapi.app:sio_asgi_app", host="0.0.0.0", port=3000, reload=False)
+    uvicorn.run("api.app:sio_asgi_app", host="0.0.0.0", port=3000, reload=False)
 

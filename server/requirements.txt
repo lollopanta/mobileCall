@@ -9,3 +9,4 @@ pyopenssl
 python-multipart
 jinja2
 aiofiles
+werkzeug

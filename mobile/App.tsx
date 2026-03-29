@@ -77,6 +77,8 @@ export default function App() {
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [callDuration, setCallDuration] = useState(0);
+  const [newFamilyName, setNewFamilyName] = useState('');
+  const [newFamilyAdminRole, setNewFamilyAdminRole] = useState<'caregiver' | 'grandparent'>('caregiver');
 
   // Image Processing State
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -432,6 +434,40 @@ export default function App() {
     }
   };
 
+  const uploadProfilePhoto = async () => {
+    let result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
+    });
+
+    if (!result.canceled) {
+      const uri = result.assets[0].uri;
+      const baseUrl = getBaseUrl();
+      const formData = new FormData();
+      // @ts-ignore
+      formData.append('image', {
+        uri: Platform.OS === 'android' ? uri : uri.replace('file://', ''),
+        name: 'profile.jpg',
+        type: 'image/jpeg',
+      });
+
+      try {
+        const res = await axios.post(`${baseUrl}/api/profile/upload-direct`, formData, {
+          headers: { 
+            'Content-Type': 'multipart/form-data',
+            'Authorization': `Bearer ${authToken}`
+          },
+        });
+        Alert.alert('Success', 'Profile photo updated');
+        fetchProfile();
+      } catch (e) {
+        Alert.alert('Error', 'Upload failed');
+      }
+    }
+  };
+
   const startLocalStream = async (video: boolean) => {
     console.log(`Starting local stream: video=${video}`);
     
@@ -755,9 +791,21 @@ export default function App() {
           {view === 'profile' && (
             <View className="p-5">
               <View className="items-center mb-7">
-                <View className="w-24 h-24 rounded-full bg-purple-600 justify-center items-center mb-4">
-                  <Text className="text-white text-4xl font-bold">{(userProfile?.username || 'U')[0].toUpperCase()}</Text>
-                </View>
+                <Pressable onPress={uploadProfilePhoto} className="relative">
+                  <View className="w-24 h-24 rounded-full bg-purple-600 justify-center items-center mb-4 overflow-hidden">
+                    {userProfile?.profile_image ? (
+                      <Image 
+                        source={{ uri: `${getBaseUrl()}${userProfile.profile_image}` }} 
+                        className="w-full h-full"
+                      />
+                    ) : (
+                      <Text className="text-white text-4xl font-bold">{(userProfile?.username || 'U')[0].toUpperCase()}</Text>
+                    )}
+                  </View>
+                  <View className="absolute bottom-4 right-0 bg-purple-500 rounded-full p-1.5 border-2 border-bg-main">
+                    <MaterialIcons name="edit" size={16} color="#fff" />
+                  </View>
+                </Pressable>
                 <Text className="text-2xl font-bold text-text-main">{userProfile?.username}</Text>
                 <Text className="text-text-dim">{userProfile?.role || 'No Role Set'}</Text>
               </View>
@@ -793,10 +841,41 @@ export default function App() {
                 <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
                   <Text className="text-lg font-bold mb-4 text-text-main">Join a Family</Text>
                   <Text className="mb-5 text-text-dim">You are not in a family yet. Create one or wait for an invite.</Text>
+                  
+                  <TextInput
+                    className="w-full p-4 bg-bg-main rounded-xl mb-3 border border-glass-border text-base text-text-main"
+                    placeholder="Family Name"
+                    value={newFamilyName}
+                    onChangeText={setNewFamilyName}
+                    placeholderTextColor="#666"
+                  />
+
+                  <View className="mb-5">
+                    <Text className="text-sm text-text-dim mb-2.5">Your Role</Text>
+                    <View className="flex-row gap-2.5">
+                      {['caregiver', 'grandparent'].map(r => (
+                        <Pressable 
+                          key={r} 
+                          onPress={() => setNewFamilyAdminRole(r as any)} 
+                          className={`flex-1 p-3 rounded-xl border items-center ${newFamilyAdminRole === r ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}
+                        >
+                          <Text className={newFamilyAdminRole === r ? 'text-white' : 'text-text-dim'}>{r.charAt(0).toUpperCase() + r.slice(1)}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+
                   <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
+                    if (!newFamilyName) {
+                      Alert.alert('Error', 'Please enter a family name');
+                      return;
+                    }
                     const baseUrl = getBaseUrl();
                     try {
-                      await axios.post(`${baseUrl}/api/family/create`, { name: `${username}'s Family` }, getAuthHeaders());
+                      await axios.post(`${baseUrl}/api/family/create`, { 
+                        name: newFamilyName,
+                        role: newFamilyAdminRole
+                      }, getAuthHeaders());
                       fetchProfile();
                     } catch(e) {}
                   }}>

@@ -3,4 +3,4 @@ echo "🚀 Starting the MobileCall Signaling Server (FastAPI + asyncio)..."
 
 # Ensure we use the virtual environment
 source .venv/bin/activate
-python fastapi/app.py
+python api/app.py

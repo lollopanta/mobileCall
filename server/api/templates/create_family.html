@@ -17,6 +17,13 @@
                 <label for="familyName">Family Name</label>
                 <input type="text" id="familyName" class="inputField" placeholder="e.g. The Smith Family" required>
             </div>
+            <div class="form-group">
+                <label for="adminRole">Your Role in this Family</label>
+                <select id="adminRole" class="inputField" style="appearance: none;">
+                    <option value="caregiver">Caregiver</option>
+                    <option value="grandparent">Grandparent</option>
+                </select>
+            </div>
             <button type="submit" class="submitButton">Create Family</button>
         </form>
         
@@ -30,13 +37,14 @@
         document.getElementById('createFamilyForm').onsubmit = async (e) => {
             e.preventDefault();
             const name = document.getElementById('familyName').value;
+            const role = document.getElementById('adminRole').value;
             const res = await fetch('/api/family/create', {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ name })
+                body: JSON.stringify({ name, role })
             });
             const result = await res.json();
             if (result.status === 'successful') {
