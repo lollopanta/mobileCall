@@ -176,7 +176,102 @@ async def logout():
     response.delete_cookie("logged_in_user")
     return response
 
+import re
+import aiohttp # Assuming we should use async for scraping, I'll add a helper or use urllib
+
 # --- Family API ---
+
+@app.get("/api/family/settings")
+async def get_family_settings(current_user = Depends(get_current_user)):
+    family_id = current_user['family_id']
+    if not family_id:
+        return JSONResponse({"status": "unsuccessful", "message": "No family joined"}, status_code=404)
+
+    loop = asyncio.get_event_loop()
+    def _get():
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT google_photos_album_url, idle_timeout FROM families WHERE id = ?', (family_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    settings = await loop.run_in_executor(None, _get)
+    return {"status": "successful", "settings": settings}
+
+@app.post("/api/family/settings")
+async def update_family_settings(request: Request, current_user = Depends(get_current_user)):
+    data = await request.json()
+    album_url = data.get('google_photos_album_url')
+    idle_timeout = data.get('idle_timeout', 5)
+    
+    if current_user['role'] != 'admin' and current_user['role'] != 'caregiver':
+        return JSONResponse({"status": "unsuccessful", "message": "Only admin/caregiver can update settings"}, status_code=403)
+
+    family_id = current_user['family_id']
+    loop = asyncio.get_event_loop()
+    def _update():
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE families SET google_photos_album_url = ?, idle_timeout = ? WHERE id = ?', 
+                       (album_url, idle_timeout, family_id))
+        conn.commit()
+        conn.close()
+
+    await loop.run_in_executor(None, _update)
+    return {"status": "successful", "message": "Settings updated"}
+
+@app.get("/api/family/photos")
+async def get_family_photos(current_user = Depends(get_current_user)):
+    family_id = current_user['family_id']
+    if not family_id:
+        return JSONResponse({"status": "unsuccessful", "message": "No family joined"}, status_code=404)
+
+    loop = asyncio.get_event_loop()
+    def _get_url():
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT google_photos_album_url FROM families WHERE id = ?', (family_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    album_url = await loop.run_in_executor(None, _get_url)
+    if not album_url:
+        return {"status": "successful", "photos": []}
+
+    # Scrape Google Photos Album
+    # Simple regex for public albums: looks for base URLs of images
+    try:
+        import urllib.request
+        def _scrape(url):
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req) as response:
+                    html = response.read().decode('utf-8')
+                    # Find image URLs: they usually look like https://lh3.googleusercontent.com/...
+                    # We want the ones that are likely to be photos in the album
+                    # This regex matches the common pattern for Google Photos image URLs in the page source
+                    pattern = r'\"(https:\/\/lh3\.googleusercontent\.com\/pw\/[^\"]+)\"'
+                    matches = re.findall(pattern, html)
+                    # Deduplicate and limit to high-res (remove sizing params if any, add =w1920)
+                    photos = []
+                    seen = set()
+                    for m in matches:
+                        base = m.split('=')[0]
+                        if base not in seen:
+                            photos.append(f"{base}=w1920-h1080")
+                            seen.add(base)
+                    return photos
+            except Exception as e:
+                print(f"Scraping error: {e}")
+                return []
+
+        photos = await loop.run_in_executor(None, _scrape, album_url)
+        return {"status": "successful", "photos": photos}
+    except Exception as e:
+        return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
 
 @app.post("/api/family/create")
 async def create_family(request: Request, current_user = Depends(get_current_user)):

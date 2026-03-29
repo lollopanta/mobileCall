@@ -248,3 +248,6 @@ __marimo__/
 # Local Databases
 *.db
 *.sqlite3
+
+#Uploads
+server/api/static/uploads

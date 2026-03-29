@@ -52,7 +52,7 @@ type User = { id: string; name: string; is_voip_eligible?: boolean };
 
 export default function App() {
   const colorScheme = useColorScheme();
-  const [view, setView] = useState<'auth' | 'main' | 'call' | 'upload' | 'profile' | 'family' | 'notifications'>('auth');
+  const [view, setView] = useState<'auth' | 'main' | 'call' | 'upload' | 'profile' | 'family' | 'notifications' | 'family_settings'>('auth');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
   // Auth State
@@ -67,6 +67,14 @@ export default function App() {
   const [familyMembers, setFamilyMembers] = useState<any[]>([]);
   const [pendingInvitations, setPendingInvitations] = useState<any[]>([]);
   const [notificationsBadge, setNotificationsBadge] = useState(false);
+  const [familySettings, setFamilySettings] = useState<{ google_photos_album_url?: string; idle_timeout: number }>({ idle_timeout: 5 });
+
+  // Ambient Mode State
+  const [isIdle, setIsIdle] = useState(false);
+  const [albumPhotos, setAlbumPhotos] = useState<string[]>([]);
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const carouselTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // App State
   const [isJoined, setIsJoined] = useState(false);
@@ -271,10 +279,74 @@ export default function App() {
     }
   };
 
+  const resetIdleTimer = () => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    if (isIdle) {
+      setIsIdle(false);
+      setCurrentPhotoIndex(0);
+    }
+    
+    // Only start timer if logged in and not in a call
+    if (authToken && callStatus === 'idle') {
+      const timeoutMs = (familySettings?.idle_timeout || 5) * 60 * 1000;
+      idleTimerRef.current = setTimeout(() => {
+        if (albumPhotos.length > 0) {
+          setIsIdle(true);
+        }
+      }, timeoutMs);
+    }
+  };
+
+  useEffect(() => {
+    resetIdleTimer();
+    return () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    };
+  }, [authToken, callStatus, familySettings, albumPhotos]);
+
+  useEffect(() => {
+    if (isIdle && albumPhotos.length > 0) {
+      carouselTimerRef.current = setInterval(() => {
+        setCurrentPhotoIndex(prev => (prev + 1) % albumPhotos.length);
+      }, 5000); // Change photo every 5 seconds
+    } else {
+      if (carouselTimerRef.current) clearInterval(carouselTimerRef.current);
+    }
+    return () => {
+      if (carouselTimerRef.current) clearInterval(carouselTimerRef.current);
+    };
+  }, [isIdle, albumPhotos]);
+
+  const fetchFamilySettings = async () => {
+    if (!authToken) return;
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await axios.get(`${baseUrl}/api/family/settings`, getAuthHeaders());
+      if (res.data.status === 'successful') {
+        setFamilySettings(res.data.settings);
+        if (res.data.settings.google_photos_album_url) {
+          fetchFamilyPhotos();
+        }
+      }
+    } catch (e) {}
+  };
+
+  const fetchFamilyPhotos = async () => {
+    if (!authToken) return;
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await axios.get(`${baseUrl}/api/family/photos`, getAuthHeaders());
+      if (res.data.status === 'successful') {
+        setAlbumPhotos(res.data.photos);
+      }
+    } catch (e) {}
+  };
+
   useEffect(() => {
     if (authToken && view !== 'auth') {
       fetchProfile();
       fetchNotifications();
+      fetchFamilySettings();
     }
   }, [authToken, view]);
 
@@ -743,8 +815,27 @@ export default function App() {
     );
   }
 
+  if (isIdle && albumPhotos.length > 0) {
+    return (
+      <Pressable onPress={resetIdleTimer} className="flex-1 bg-black">
+        <StatusBar hidden />
+        <Image
+          key={albumPhotos[currentPhotoIndex]}
+          source={{ uri: albumPhotos[currentPhotoIndex] }}
+          className="w-full h-full"
+          contentFit="contain"
+        />
+        <View className="absolute bottom-10 left-0 right-0 items-center">
+          <View className="bg-black/40 px-6 py-3 rounded-full border border-white/20 backdrop-blur-md">
+            <Text className="text-white/80 font-medium tracking-widest text-lg">TOUCH TO START</Text>
+          </View>
+        </View>
+      </Pressable>
+    );
+  }
+
   return (
-    <SafeAreaView className="flex-1 bg-bg-main">
+    <SafeAreaView onTouchStart={resetIdleTimer} className="flex-1 bg-bg-main">
       <StatusBar style="auto" />
       <View className="flex-1">
         {/* Header */}
@@ -886,9 +977,16 @@ export default function App() {
                 <>
                   <View className="flex-row justify-between items-center mb-5">
                     <Text className="text-2xl font-bold text-text-main">Family Members</Text>
-                    <Pressable onPress={pickImage} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
-                      <MaterialIcons name="add-a-photo" size={24} color="#D8B4FE" />
-                    </Pressable>
+                    <View className="flex-row gap-2.5">
+                      {(userProfile?.role === 'admin' || userProfile?.role === 'caregiver') && (
+                        <Pressable onPress={() => setView('family_settings')} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
+                          <MaterialIcons name="settings" size={24} color="#D8B4FE" />
+                        </Pressable>
+                      )}
+                      <Pressable onPress={pickImage} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
+                        <MaterialIcons name="add-a-photo" size={24} color="#D8B4FE" />
+                      </Pressable>
+                    </View>
                   </View>
                   {familyMembers.map((m, i) => (
                     <View key={i} className="flex-row items-center p-4 bg-bg-card rounded-2xl mb-2.5 border border-glass-border">
@@ -901,6 +999,52 @@ export default function App() {
                   ))}
                 </>
               )}
+            </View>
+          )}
+
+          {view === 'family_settings' && (
+            <View className="p-5">
+              <Pressable onPress={() => setView('family')} className="flex-row items-center mb-5">
+                <MaterialIcons name="arrow-back" size={24} color="#9333EA" />
+                <Text className="text-purple-400 font-bold ml-2">Back to Family</Text>
+              </Pressable>
+
+              <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                <Text className="text-lg font-bold mb-4 text-text-main">Ambient Mode</Text>
+                
+                <Text className="text-sm text-text-dim mb-2.5">Google Photos Album URL</Text>
+                <TextInput
+                  className="w-full p-4 bg-bg-main rounded-xl mb-3 border border-glass-border text-base text-text-main"
+                  placeholder="Paste shared album link here"
+                  value={familySettings?.google_photos_album_url}
+                  onChangeText={(text) => setFamilySettings({...familySettings, google_photos_album_url: text})}
+                  placeholderTextColor="#666"
+                />
+                
+                <Text className="text-sm text-text-dim mb-2.5">Idle Timeout (minutes)</Text>
+                <View className="flex-row gap-2.5 mb-5">
+                  {[2, 5, 10, 15].map(m => (
+                    <Pressable 
+                      key={m} 
+                      onPress={() => setFamilySettings({...familySettings, idle_timeout: m})} 
+                      className={`flex-1 p-3 rounded-xl border items-center ${familySettings?.idle_timeout === m ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}
+                    >
+                      <Text className={familySettings?.idle_timeout === m ? 'text-white' : 'text-text-dim'}>{m}m</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
+                   const baseUrl = getBaseUrl();
+                   try {
+                     await axios.post(`${baseUrl}/api/family/settings`, familySettings, getAuthHeaders());
+                     Alert.alert('Success', 'Settings saved');
+                     fetchFamilySettings();
+                   } catch (e) { Alert.alert('Error', 'Update failed'); }
+                }}>
+                  <Text className="text-white font-bold">Save Settings</Text>
+                </Pressable>
+              </View>
             </View>
           )}
 

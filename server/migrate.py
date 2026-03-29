@@ -29,12 +29,31 @@ def migrate():
             except sqlite3.OperationalError as e:
                 print(f"Error adding column {col}: {e}")
 
+    # Get current columns for families
+    cursor.execute("PRAGMA table_info(families)")
+    families_columns = [row[1] for row in cursor.fetchall()]
+    
+    missing_families_columns = {
+        'google_photos_album_url': "TEXT",
+        'idle_timeout': "INTEGER DEFAULT 5"
+    }
+
+    for col, definition in missing_families_columns.items():
+        if col not in families_columns:
+            print(f"Adding column '{col}' to 'families' table...")
+            try:
+                cursor.execute(f"ALTER TABLE families ADD COLUMN {col} {definition}")
+            except Exception as e:
+                print(f"Error adding column {col} to families: {e}")
+
     # Ensure families table exists
     cursor.execute(''' 
         CREATE TABLE IF NOT EXISTS families (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             admin_id INTEGER,
+            google_photos_album_url TEXT,
+            idle_timeout INTEGER DEFAULT 5,
             FOREIGN KEY (admin_id) REFERENCES users (id)
         )
     ''')

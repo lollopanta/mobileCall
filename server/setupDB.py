@@ -21,6 +21,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             admin_id INTEGER,
+            google_photos_album_url TEXT,
+            idle_timeout INTEGER DEFAULT 5,
             FOREIGN KEY (admin_id) REFERENCES users (id)
         )
     ''')
