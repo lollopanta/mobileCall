@@ -7,6 +7,7 @@ import jwt
 import datetime
 from functools import wraps
 from typing import Optional
+from contextlib import asynccontextmanager
 
 import uvicorn
 import aiofiles
@@ -24,6 +25,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from setupDB import add_new_user, get_user, update_profile_image, get_connection
 from api.services.eligibility_service import EligibilityService
 from api.services.image_service import ImageProcessingService
+from api.services.fall_sensor import FallSensorService
 
 # --- Configuration ---
 SECRET_KEY = 'super_secret_key_change_this_later'
@@ -40,8 +42,18 @@ sio = socketio.AsyncServer(
     ping_interval=25
 )
 
+# --- Lifespan Handler ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize services
+    grandparent_username = os.getenv("GRANDPARENT_USERNAME", "grandparent")
+    asyncio.create_task(fall_sensor.start_monitoring(sio, grandparent_username))
+    yield
+    # Shutdown: Clean up resources if needed
+    pass
+
 # --- FastAPI App Setup ---
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,6 +68,7 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 
 # --- Services ---
 image_processor = ImageProcessingService()
+fall_sensor = FallSensorService()
 # Note: we keep these as dicts in memory as before, though for production 
 # shared state between processes would need Redis/DB.
 connected_users = {} # {sid: {"name": username, "family_id": family_id}}
@@ -117,8 +130,8 @@ async def register(request: Request):
         return JSONResponse({"status": "unsuccessful", "message": "Username and password required"}, status_code=400)
 
     loop = asyncio.get_event_loop()
-    # Default values for simplified registration
-    is_successful = await loop.run_in_executor(None, add_new_user, uName, passW, None, 'basic', 1, 'standard', None)
+    # Default values for simplified registration (Default role: grandparent)
+    is_successful = await loop.run_in_executor(None, add_new_user, uName, passW, None, 'basic', 1, 'grandparent', None)
 
     if is_successful:
         token = generate_token(uName)
@@ -205,8 +218,8 @@ async def update_family_settings(request: Request, current_user = Depends(get_cu
     album_url = data.get('google_photos_album_url')
     idle_timeout = data.get('idle_timeout', 5)
     
-    if current_user['role'] != 'admin' and current_user['role'] != 'caregiver':
-        return JSONResponse({"status": "unsuccessful", "message": "Only admin/caregiver can update settings"}, status_code=403)
+    if current_user['role'] not in ['caregiver', 'grandparent']:
+        return JSONResponse({"status": "unsuccessful", "message": "Unauthorized role"}, status_code=403)
 
     family_id = current_user['family_id']
     loop = asyncio.get_event_loop()
@@ -277,7 +290,10 @@ async def get_family_photos(current_user = Depends(get_current_user)):
 async def create_family(request: Request, current_user = Depends(get_current_user)):
     data = await request.json()
     family_name = data.get('name')
-    admin_role = data.get('role', 'admin') # Default to admin if not provided
+    # Limit roles to caregiver or grandparent
+    admin_role = data.get('role', 'grandparent')
+    if admin_role not in ['caregiver', 'grandparent']:
+        admin_role = 'grandparent'
     
     if not family_name:
         return JSONResponse({"status": "unsuccessful", "message": "Family name required"}, status_code=400)
@@ -311,9 +327,14 @@ async def get_family_members(current_user = Depends(get_current_user)):
     def _get():
         conn = get_connection()
         cursor = conn.cursor()
+        # Get admin_id to mark who is admin
+        cursor.execute('SELECT admin_id FROM families WHERE id = ?', (family_id,))
+        family_row = cursor.fetchone()
+        admin_id = family_row[0] if family_row else None
+        
         cursor.execute('SELECT id, username, role, profile_image FROM users WHERE family_id = ?', (family_id,))
         rows = cursor.fetchall()
-        members = [{"id": r[0], "username": r[1], "role": r[2], "profile_image": r[3]} for r in rows]
+        members = [{"id": r[0], "username": r[1], "role": r[2], "profile_image": r[3], "is_admin": (r[0] == admin_id)} for r in rows]
         conn.close()
         return members
 
@@ -379,6 +400,30 @@ async def get_notifications(current_user = Depends(get_current_user)):
     invites = await loop.run_in_executor(None, _get)
     return {"status": "successful", "notifications": invites}
 
+@app.get("/api/family/fall-logs")
+async def get_fall_logs(current_user = Depends(get_current_user)):
+    family_id = current_user['family_id']
+    if not family_id:
+        return {"status": "successful", "logs": []}
+
+    loop = asyncio.get_event_loop()
+    def _get():
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT fl.id, u.username, fl.timestamp, fl.status
+            FROM fall_logs fl
+            JOIN users u ON fl.user_id = u.id
+            WHERE fl.family_id = ?
+            ORDER BY fl.timestamp DESC
+        ''', (family_id,))
+        logs = [{"id": r[0], "username": r[1], "timestamp": r[2], "status": r[3]} for r in cursor.fetchall()]
+        conn.close()
+        return logs
+
+    logs = await loop.run_in_executor(None, _get)
+    return {"status": "successful", "logs": logs}
+
 @app.post("/api/notifications/respond")
 async def respond_notification(request: Request, current_user = Depends(get_current_user)):
     data = await request.json()
@@ -427,6 +472,28 @@ async def get_profile(current_user = Depends(get_current_user)):
     user_data = dict(current_user)
     user_data['is_family_admin'] = is_admin
     return {"status": "successful", "user": user_data}
+
+@app.post("/api/profile/update")
+async def update_profile(request: Request, current_user = Depends(get_current_user)):
+    data = await request.json()
+    role = data.get('role')
+    age = data.get('age')
+    
+    if role and role not in ['caregiver', 'grandparent']:
+        return JSONResponse({"status": "unsuccessful", "message": "Invalid role. Must be caregiver or grandparent."}, status_code=400)
+    
+    loop = asyncio.get_event_loop()
+    def _update():
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            if role: cursor.execute('UPDATE users SET role = ? WHERE id = ?', (role, current_user['id']))
+            if age: cursor.execute('UPDATE users SET age = ? WHERE id = ?', (age, current_user['id']))
+            conn.commit()
+        finally:
+            conn.close()
+    await loop.run_in_executor(None, _update)
+    return {"status": "successful", "message": "Profile updated"}
 
 @app.post("/api/profile/upload-direct")
 async def upload_profile_photo_direct(image: UploadFile = File(...), current_user = Depends(get_current_user)):

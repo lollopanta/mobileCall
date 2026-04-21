@@ -32,7 +32,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            role TEXT DEFAULT 'standard',
+            role TEXT DEFAULT 'grandparent',
             family_id INTEGER,
             age INTEGER,
             subscription_status TEXT,
@@ -56,10 +56,43 @@ def init_db():
         )
     ''')
 
+    cursor.execute(''' 
+        CREATE TABLE IF NOT EXISTS fall_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            family_id INTEGER NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'detected',
+            FOREIGN KEY (user_id) REFERENCES users (id),
+            FOREIGN KEY (family_id) REFERENCES families (id)
+        )
+    ''')
+
+    conn.commit()
+
+    # Create default family and grandparent if they don't exist
+    cursor.execute('SELECT id FROM families WHERE id = 1')
+    if not cursor.fetchone():
+        print("Creating default family...")
+        cursor.execute('INSERT INTO families (id, name) VALUES (1, "Default Family")')
+    
+    cursor.execute('SELECT id FROM users WHERE username = "grandparent"')
+    if not cursor.fetchone():
+        print("Creating default grandparent user...")
+        salt = bcrypt.gensalt()
+        hashed_password = bcrypt.hashpw("grandparent123".encode('utf-8'), salt)
+        cursor.execute('''
+            INSERT INTO users (username, password, role, family_id, is_voip_eligible) 
+            VALUES (?, ?, ?, ?, ?)
+        ''', ("grandparent", hashed_password, "grandparent", 1, 1))
+        
+        # Set grandparent as admin of the default family
+        cursor.execute('UPDATE families SET admin_id = (SELECT id FROM users WHERE username = "grandparent") WHERE id = 1')
+
     conn.commit()
     conn.close()
 
-def add_new_user(username, password, age=None, sub_status=None, is_eligible=1, role='standard', family_id=None):
+def add_new_user(username, password, age=None, sub_status=None, is_eligible=1, role='grandparent', family_id=None):
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -91,6 +124,13 @@ def update_profile_image(username, image_path):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('UPDATE users SET profile_image = ? WHERE username = ?', (image_path, username))
+    conn.commit()
+    conn.close()
+
+def log_fall_event(user_id, family_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO fall_logs (user_id, family_id) VALUES (?, ?)', (user_id, family_id))
     conn.commit()
     conn.close()
 

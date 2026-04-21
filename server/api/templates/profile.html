@@ -49,7 +49,6 @@
                     <select id="roleSelect" class="inputField" style="appearance: none;">
                         <option value="caregiver" {% if user['role'] == 'caregiver' %}selected{% endif %}>Caregiver</option>
                         <option value="grandparent" {% if user['role'] == 'grandparent' %}selected{% endif %}>Grandparent</option>
-                        {% if user['role'] == 'admin' %}<option value="admin" selected>Admin</option>{% endif %}
                     </select>
                 </div>
                 <div class="form-group">

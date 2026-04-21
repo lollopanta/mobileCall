@@ -139,7 +139,7 @@
                                 <div style="font-weight: 600;">${m.username}</div>
                                 <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: capitalize;">${m.role}</div>
                             </div>
-                            ${m.role === 'admin' ? '<span class="badge badge-success">Admin</span>' : ''}
+                            ${m.is_admin ? '<span class="badge badge-success">Admin</span>' : ''}
                         </div>
                     `).join('');
                 }
