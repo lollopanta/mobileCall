@@ -66,28 +66,63 @@ class FallSensorService:
         return x, y, z
 
     async def start_monitoring(self, sio_server, grandparent_username):
-        print(f"Starting fall monitoring for user: {grandparent_username}")
-        
-        # Get user and family info
-        def _get_user_info():
+        print(f"Starting fall monitoring. Preferred username: {grandparent_username}")
+
+        def _get_target_user_info():
             conn = get_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT id, family_id FROM users WHERE username = ?', (grandparent_username,))
+            if grandparent_username:
+                cursor.execute(
+                    '''
+                    SELECT u.id, u.family_id, u.username
+                    FROM users u
+                    JOIN families f ON f.primary_grandparent_id = u.id
+                    WHERE u.username = ?
+                    ''',
+                    (grandparent_username,),
+                )
+                res = cursor.fetchone()
+                if res:
+                    conn.close()
+                    return res
+
+            cursor.execute(
+                '''
+                SELECT u.id, u.family_id, u.username
+                FROM families f
+                JOIN users u ON u.id = f.primary_grandparent_id
+                ORDER BY f.id ASC
+                LIMIT 1
+                '''
+            )
             res = cursor.fetchone()
             conn.close()
             return res
-        
-        user_info = _get_user_info()
-        if not user_info:
-            print(f"Error: Grandparent user '{grandparent_username}' not found in database.")
-            return
-        
-        grandparent_id, family_id = user_info
-        if not family_id:
-            print(f"Error: User '{grandparent_username}' is not in a family.")
-            return
+
+        def _get_family_caregivers(family_id):
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT username FROM users WHERE family_id = ? AND role = "caregiver" ORDER BY username ASC',
+                (family_id,),
+            )
+            caregivers = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return caregivers
 
         while True:
+            user_info = _get_target_user_info()
+            if not user_info:
+                print("No primary grandparent configured. Fall monitoring is waiting for setup.")
+                await asyncio.sleep(10)
+                continue
+
+            grandparent_id, family_id, resolved_username = user_info
+            if not family_id:
+                print(f"Configured primary grandparent '{resolved_username}' is not in a family.")
+                await asyncio.sleep(10)
+                continue
+
             if not self.enabled:
                 print("Sensor not enabled, attempting to re-initialize...")
                 self.__init__(self.bus_number, self.address)
@@ -111,7 +146,7 @@ class FallSensorService:
                     # Emit emergency event to the family room
                     room = f"family_{family_id}"
                     await sio_server.emit('emergency-fall', {
-                        'username': grandparent_username,
+                        'username': resolved_username,
                         'user_id': grandparent_id,
                         'family_id': family_id,
                         'message': 'Emergency: Fall detected!'
@@ -119,10 +154,13 @@ class FallSensorService:
                     
                     # Logic for group call: Tell all caregivers to join a call
                     # We broadcast a 'start-emergency-call' event
+                    caregivers = await loop.run_in_executor(None, _get_family_caregivers, family_id)
                     await sio_server.emit('start-emergency-call', {
-                        'initiator': grandparent_username,
+                        'initiator': resolved_username,
                         'initiator_id': grandparent_id,
-                        'family_id': family_id
+                        'family_id': family_id,
+                        'caregivers': caregivers,
+                        'mode': 'emergency-group'
                     }, room=room)
                     
                     # Wait 30 seconds before re-arming to prevent spam

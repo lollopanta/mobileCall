@@ -1,6 +1,9 @@
 import sqlite3
 import bcrypt
 import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 # Absolute path anchored to this file — always server/userDatabase.db
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'userDatabase.db')
@@ -12,6 +15,12 @@ def get_connection():
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
+def ensure_column(cursor, table_name, column_name, definition):
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = {row[1] for row in cursor.fetchall()}
+    if column_name not in columns:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -21,9 +30,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             admin_id INTEGER,
+            primary_grandparent_id INTEGER,
             google_photos_album_url TEXT,
             idle_timeout INTEGER DEFAULT 5,
-            FOREIGN KEY (admin_id) REFERENCES users (id)
+            FOREIGN KEY (admin_id) REFERENCES users (id),
+            FOREIGN KEY (primary_grandparent_id) REFERENCES users (id)
         )
     ''')
 
@@ -68,6 +79,8 @@ def init_db():
         )
     ''')
 
+    ensure_column(cursor, "families", "primary_grandparent_id", "INTEGER")
+
     conn.commit()
 
     # Create default family and grandparent if they don't exist
@@ -80,7 +93,8 @@ def init_db():
     if not cursor.fetchone():
         print("Creating default grandparent user...")
         salt = bcrypt.gensalt()
-        hashed_password = bcrypt.hashpw("grandparent123".encode('utf-8'), salt)
+        default_password = os.getenv("DEFAULT_GRANDPARENT_PASSWORD", "change-me-now")
+        hashed_password = bcrypt.hashpw(default_password.encode('utf-8'), salt)
         cursor.execute('''
             INSERT INTO users (username, password, role, family_id, is_voip_eligible) 
             VALUES (?, ?, ?, ?, ?)

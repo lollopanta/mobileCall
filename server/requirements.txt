@@ -12,3 +12,4 @@ aiofiles
 werkzeug
 aiohttp
 smbus2
+python-dotenv

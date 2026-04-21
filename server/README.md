@@ -1,6 +1,6 @@
 # MobileCall Signaling Server
 
-A high-performance WebRTC signaling server built with Flask and Socket.IO. This server manages user authentication, persistent presence, and real-time signaling for video calls between mobile and web clients.
+A high-performance WebRTC signaling server built with FastAPI, Uvicorn, and Socket.IO. This server manages user authentication, persistent presence, and real-time signaling for video calls between mobile and web clients.
 
 ---
 
@@ -48,7 +48,12 @@ Ensure you have the following installed:
     pip install -r requirements.txt
     ```
 
-4.  **Initialize Database**
+4.  **Create Local Environment File**
+    ```bash
+    cp .env.example .env
+    ```
+
+5.  **Initialize Database**
     ```bash
     python setupDB.py
     ```
@@ -60,12 +65,11 @@ Ensure you have the following installed:
 To start the signaling server with WebSocket support, run:
 
 ```bash
-# Windows & Linux
-python fastapi/app.py
+python api/app.py
 ```
 
 > [!IMPORTANT]
-> **Do not use `flask run`**. Standard Flask development servers do not support the persistent WebSocket upgrades required for WebRTC. Always use `python fastapi/app.py`.
+> **Do not use `flask run`**. This project is ASGI-based and should be started with `python api/app.py`.
 
 The server will be available at:
 -   **Local**: `http://127.0.0.1:3000`
@@ -86,7 +90,7 @@ For mobile clients connecting to this server:
 ## 🎨 Web Dashboard
 
 The web interface is built with:
-*   **Flask Templates**: Semantic HTML5.
+*   **Jinja2 Templates via FastAPI**: Semantic HTML5.
 *   **Custom CSS**: Modern dark-mode aesthetics with Glassmorphism.
 *   **Socket.IO Client**: Integrated signaling logic.
 

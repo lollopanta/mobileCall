@@ -48,7 +48,21 @@ const iceServers = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
-type User = { id: string; name: string; is_voip_eligible?: boolean };
+type User = {
+  id: string;
+  name: string;
+  role?: 'caregiver' | 'grandparent';
+  user_id?: number;
+  is_primary_grandparent?: boolean;
+  is_voip_eligible?: boolean;
+};
+type TimerRef = ReturnType<typeof setTimeout>;
+type FamilySettingsState = {
+  google_photos_album_url?: string;
+  idle_timeout: number;
+  primary_grandparent_id?: number | null;
+  primary_grandparent_username?: string | null;
+};
 
 export default function App() {
   const colorScheme = useColorScheme();
@@ -67,14 +81,15 @@ export default function App() {
   const [familyMembers, setFamilyMembers] = useState<any[]>([]);
   const [pendingInvitations, setPendingInvitations] = useState<any[]>([]);
   const [notificationsBadge, setNotificationsBadge] = useState(false);
-  const [familySettings, setFamilySettings] = useState<{ google_photos_album_url?: string; idle_timeout: number }>({ idle_timeout: 5 });
+  const [familySettings, setFamilySettings] = useState<FamilySettingsState>({ idle_timeout: 5 });
+  const [selectedInviteRoles, setSelectedInviteRoles] = useState<Record<number, 'caregiver' | 'grandparent'>>({});
 
   // Ambient Mode State
   const [isIdle, setIsIdle] = useState(false);
   const [albumPhotos, setAlbumPhotos] = useState<string[]>([]);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
-  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const carouselTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const idleTimerRef = useRef<TimerRef | null>(null);
+  const carouselTimerRef = useRef<TimerRef | null>(null);
 
   // App State
   const [isJoined, setIsJoined] = useState(false);
@@ -375,6 +390,13 @@ export default function App() {
       if (res.data.status === 'successful') {
         setPendingInvitations(res.data.notifications);
         setNotificationsBadge(res.data.notifications.length > 0);
+        setSelectedInviteRoles((prev) => {
+          const next = { ...prev };
+          for (const invitation of res.data.notifications) {
+            if (!next[invitation.id]) next[invitation.id] = 'caregiver';
+          }
+          return next;
+        });
       }
     } catch (e) {}
   };
@@ -425,6 +447,18 @@ export default function App() {
       playRingtone();
     });
 
+    socketRef.current.on('emergency-fall', (data) => {
+      Alert.alert('Emergency Alert', `${data.username} may have fallen. Check the family call panel now.`);
+    });
+
+    socketRef.current.on('start-emergency-call', (data) => {
+      if (userProfile?.is_primary_grandparent) {
+        Alert.alert('Emergency Mode', `Emergency call requested for ${data.caregivers?.length || 0} caregiver(s).`);
+      } else if (userProfile?.role === 'caregiver') {
+        Alert.alert('Emergency Mode', `${data.initiator} triggered an emergency group call.`);
+      }
+    });
+
     socketRef.current.on('answer', async (data) => {
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -467,6 +501,10 @@ export default function App() {
   };
 
   const uploadGroupImage = async (uri: string) => {
+    if (!authToken) {
+      Alert.alert('Error', 'You must be logged in to upload images');
+      return;
+    }
     const baseUrl = getBaseUrl();
     setUploading(true);
     const formData = new FormData();
@@ -480,7 +518,10 @@ export default function App() {
 
     try {
       const res = await axios.post(`${baseUrl}/upload-image`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: {
+          'Content-Type': 'multipart/form-data',
+          'Authorization': `Bearer ${authToken}`
+        },
       });
       setFaces(res.data.faces);
       setTempImageId(res.data.image_id);
@@ -492,14 +533,22 @@ export default function App() {
   };
 
   const finalizeFace = async (face: any) => {
+    if (!authToken) {
+      Alert.alert('Error', 'You must be logged in to update your profile');
+      return;
+    }
     const baseUrl = getBaseUrl();
     try {
       await axios.post(`${baseUrl}/finalize-crop`, {
-        username,
         image_id: tempImageId,
         face,
+      }, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
       });
       Alert.alert('Success', 'Profile image updated');
+      fetchProfile();
       setView('main');
     } catch (e) {
       Alert.alert('Error', 'Could not finalize face crop');
@@ -864,7 +913,12 @@ export default function App() {
               ) : (
                 users.map((item) => (
                   <View key={item.id} className="p-4 rounded-2xl bg-bg-card mb-3 flex-row justify-between items-center border border-glass-border">
-                    <Text className="text-lg font-medium text-text-main">{item.name}</Text>
+                    <View className="flex-1">
+                      <Text className="text-lg font-medium text-text-main">{item.name}</Text>
+                      <Text className="text-xs text-text-dim capitalize">
+                        {item.role || 'family member'}{item.is_primary_grandparent ? ' • primary grandparent' : ''}
+                      </Text>
+                    </View>
                     <View className="flex-row">
                       <Pressable onPress={() => initiateCall(item.id, item.name, false)} className="p-3 rounded-xl ml-2.5 bg-emerald-500">
                         <MaterialIcons name="call" size={20} color="#fff" />
@@ -898,25 +952,22 @@ export default function App() {
                   </View>
                 </Pressable>
                 <Text className="text-2xl font-bold text-text-main">{userProfile?.username}</Text>
-                <Text className="text-text-dim">{userProfile?.role || 'No Role Set'}</Text>
+                <Text className="text-text-dim capitalize">{userProfile?.role || 'No Role Set'}</Text>
               </View>
 
               <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
-                <Text className="text-lg font-bold mb-4 text-text-main">Update Profile</Text>
+                <Text className="text-lg font-bold mb-4 text-text-main">Profile</Text>
                 <View className="mb-5">
-                  <Text className="text-sm text-text-dim mb-2.5">Role</Text>
-                  <View className="flex-row gap-2.5">
-                    {['caregiver', 'grandparent'].map(r => (
-                      <Pressable key={r} onPress={() => setUserProfile({...userProfile, role: r})} className={`flex-1 p-3 rounded-xl border items-center ${userProfile?.role === r ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}>
-                        <Text className={userProfile?.role === r ? 'text-white' : 'text-text-dim'}>{r.charAt(0).toUpperCase() + r.slice(1)}</Text>
-                      </Pressable>
-                    ))}
+                  <Text className="text-sm text-text-dim mb-2.5">Family Role</Text>
+                  <View className="p-4 rounded-xl border border-glass-border bg-bg-main">
+                    <Text className="text-text-main capitalize">{userProfile?.role || 'Assigned when you join a family'}</Text>
+                    <Text className="text-xs text-text-dim mt-2">Roles are chosen when creating or accepting a family invitation.</Text>
                   </View>
                 </View>
                 <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
                    const baseUrl = getBaseUrl();
                    try {
-                     await axios.post(`${baseUrl}/api/profile/update`, { role: userProfile.role, age: userProfile.age }, getAuthHeaders());
+                     await axios.post(`${baseUrl}/api/profile/update`, { age: userProfile.age }, getAuthHeaders());
                      Alert.alert('Success', 'Profile updated');
                    } catch (e) { Alert.alert('Error', 'Update failed'); }
                 }}>
@@ -978,7 +1029,7 @@ export default function App() {
                   <View className="flex-row justify-between items-center mb-5">
                     <Text className="text-2xl font-bold text-text-main">Family Members</Text>
                     <View className="flex-row gap-2.5">
-                      {(userProfile?.role === 'admin' || userProfile?.role === 'caregiver' || userProfile?.is_family_admin) && (
+                      {userProfile?.is_family_admin && (
                         <Pressable onPress={() => setView('family_settings')} className="bg-purple-900/40 p-2 rounded-xl border border-purple-800/50">
                           <MaterialIcons name="settings" size={24} color="#D8B4FE" />
                         </Pressable>
@@ -992,9 +1043,11 @@ export default function App() {
                     <View key={i} className="flex-row items-center p-4 bg-bg-card rounded-2xl mb-2.5 border border-glass-border">
                        <MaterialIcons name="person" size={24} color="#D8B4FE" />
                        <View className="ml-3 flex-1">
-                         <Text className="font-bold text-text-main">{m.username}</Text>
-                         <Text className="text-xs text-text-dim capitalize">{m.role}</Text>
+                          <Text className="font-bold text-text-main">{m.username}</Text>
+                          <Text className="text-xs text-text-dim capitalize">{m.role}</Text>
                        </View>
+                       {m.is_admin && <Text className="text-[10px] px-2 py-1 rounded-full bg-emerald-600 text-white mr-2">Admin</Text>}
+                       {m.is_primary_grandparent && <Text className="text-[10px] px-2 py-1 rounded-full bg-purple-600 text-white">Primary</Text>}
                     </View>
                   ))}
                 </>
@@ -1008,6 +1061,39 @@ export default function App() {
                 <MaterialIcons name="arrow-back" size={24} color="#9333EA" />
                 <Text className="text-purple-400 font-bold ml-2">Back to Family</Text>
               </Pressable>
+
+              <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                <Text className="text-lg font-bold mb-4 text-text-main">Primary Grandparent</Text>
+                <Text className="text-sm text-text-dim mb-4">Choose the grandparent device that should start emergency calls.</Text>
+                {familyMembers.filter((member) => member.role === 'grandparent').length === 0 ? (
+                  <Text className="text-text-dim">No grandparent in the family yet.</Text>
+                ) : (
+                  familyMembers
+                    .filter((member) => member.role === 'grandparent')
+                    .map((member) => (
+                      <Pressable
+                        key={member.id}
+                        className={`p-4 rounded-xl border mb-3 ${member.is_primary_grandparent ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}
+                        onPress={async () => {
+                          const baseUrl = getBaseUrl();
+                          try {
+                            await axios.post(`${baseUrl}/api/family/primary-grandparent`, { member_id: member.id }, getAuthHeaders());
+                            fetchFamilyMembers();
+                            fetchFamilySettings();
+                            fetchProfile();
+                          } catch (e) {
+                            Alert.alert('Error', 'Could not update the primary grandparent');
+                          }
+                        }}
+                      >
+                        <Text className={member.is_primary_grandparent ? 'text-white font-bold' : 'text-text-main font-bold'}>{member.username}</Text>
+                        <Text className={member.is_primary_grandparent ? 'text-white/80 text-xs mt-1' : 'text-text-dim text-xs mt-1'}>
+                          {member.is_primary_grandparent ? 'Emergency source device' : 'Tap to set as primary'}
+                        </Text>
+                      </Pressable>
+                    ))
+                )}
+              </View>
 
               <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
                 <Text className="text-lg font-bold mb-4 text-text-main">Ambient Mode</Text>
@@ -1058,10 +1144,28 @@ export default function App() {
                   <View key={i} className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
                     <Text className="font-bold text-text-main">Family Invite</Text>
                     <Text className="my-2 text-text-dim">You have been invited to join the {inv.family_name} family.</Text>
+                    <Text className="text-sm text-text-dim mb-2.5">Choose your role before accepting</Text>
+                    <View className="flex-row gap-2.5 mb-4">
+                      {(['caregiver', 'grandparent'] as const).map((role) => (
+                        <Pressable
+                          key={role}
+                          className={`flex-1 p-3 rounded-xl border items-center ${selectedInviteRoles[inv.id] === role ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}
+                          onPress={() => setSelectedInviteRoles({ ...selectedInviteRoles, [inv.id]: role })}
+                        >
+                          <Text className={selectedInviteRoles[inv.id] === role ? 'text-white font-bold' : 'text-text-dim'}>
+                            {role.charAt(0).toUpperCase() + role.slice(1)}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                     <View className="flex-row gap-2.5">
                       <Pressable className="flex-1 p-3 rounded-xl bg-emerald-500 items-center justify-center" onPress={async () => {
                         const baseUrl = getBaseUrl();
-                        await axios.post(`${baseUrl}/api/notifications/respond`, { invite_id: inv.id, response: 'accepted' }, getAuthHeaders());
+                        await axios.post(`${baseUrl}/api/notifications/respond`, {
+                          invite_id: inv.id,
+                          response: 'accepted',
+                          role: selectedInviteRoles[inv.id] || 'caregiver',
+                        }, getAuthHeaders());
                         fetchNotifications();
                         fetchProfile();
                       }}>

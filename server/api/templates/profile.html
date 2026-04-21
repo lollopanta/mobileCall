@@ -42,14 +42,12 @@
         </div>
 
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; text-align: left; margin-bottom: 24px;">
-            <h3 style="font-size: 1rem; margin-bottom: 16px;">Account Settings</h3>
+            <h3 style="font-size: 1rem; margin-bottom: 16px;">Profile</h3>
             <form id="profileUpdateForm">
                 <div class="form-group">
-                    <label>Your Role</label>
-                    <select id="roleSelect" class="inputField" style="appearance: none;">
-                        <option value="caregiver" {% if user['role'] == 'caregiver' %}selected{% endif %}>Caregiver</option>
-                        <option value="grandparent" {% if user['role'] == 'grandparent' %}selected{% endif %}>Grandparent</option>
-                    </select>
+                    <label>Family Role</label>
+                    <div class="inputField" style="display: flex; align-items: center; min-height: 48px;">{{ user['role'] or 'Assigned when you join a family' }}</div>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 6px;">Roles are chosen when creating or accepting a family invitation.</p>
                 </div>
                 <div class="form-group">
                     <label>Age</label>
@@ -112,7 +110,6 @@
 
         document.getElementById('profileUpdateForm').onsubmit = async (e) => {
             e.preventDefault();
-            const role = document.getElementById('roleSelect').value;
             const age = document.getElementById('ageInput').value;
             
             const res = await fetch('/api/profile/update', {
@@ -121,7 +118,7 @@
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ role, age })
+                body: JSON.stringify({ age })
             });
             const result = await res.json();
             if (result.status === 'successful') {

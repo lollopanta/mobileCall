@@ -31,6 +31,26 @@
         .btn-decline { background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2); }
         .btn-accept:hover { background: #0ea271; transform: translateY(-1px); }
         .btn-decline:hover { background: rgba(239, 68, 68, 0.2); }
+        .role-picker {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .role-chip {
+            flex: 1;
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px solid var(--glass-border);
+            background: rgba(255,255,255,0.04);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .role-chip.active {
+            background: var(--purple);
+            border-color: var(--purple-dark);
+            color: white;
+        }
     </style>
 </head>
 <body>
@@ -71,6 +91,13 @@
                                 </div>
                                 <span class="badge badge-pending">New</span>
                             </div>
+                            <div>
+                                <p style="font-size: 0.8rem; color: var(--text-muted); margin: 8px 0;">Choose your role in this family</p>
+                                <div class="role-picker">
+                                    <button class="role-chip active" data-invite="${n.id}" data-role="caregiver" onclick="selectRole(event, ${n.id}, 'caregiver')">Caregiver</button>
+                                    <button class="role-chip" data-invite="${n.id}" data-role="grandparent" onclick="selectRole(event, ${n.id}, 'grandparent')">Grandparent</button>
+                                </div>
+                            </div>
                             <div class="actions">
                                 <button class="btn-sm btn-accept" onclick="respond(${n.id}, 'accepted')">Accept</button>
                                 <button class="btn-sm btn-decline" onclick="respond(${n.id}, 'rejected')">Decline</button>
@@ -83,6 +110,16 @@
             }
         }
 
+        const selectedRoles = {};
+
+        function selectRole(event, inviteId, role) {
+            event.preventDefault();
+            selectedRoles[inviteId] = role;
+            document.querySelectorAll(`[data-invite="${inviteId}"]`).forEach((button) => {
+                button.classList.toggle('active', button.dataset.role === role);
+            });
+        }
+
         async function respond(inviteId, response) {
             const res = await fetch('/api/notifications/respond', {
                 method: 'POST',
@@ -90,7 +127,11 @@
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ invite_id: inviteId, response })
+                body: JSON.stringify({
+                    invite_id: inviteId,
+                    response,
+                    role: selectedRoles[inviteId] || 'caregiver'
+                })
             });
             const result = await res.json();
             if (result.status === 'successful') {

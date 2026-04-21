@@ -15,6 +15,17 @@
 
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; margin-bottom: 24px;">
             <h3 style="display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px;">
+                Primary Grandparent
+            </h3>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 16px;">Choose which grandparent device should originate emergency calls after a fall.</p>
+            <div id="primaryGrandparentList">
+                <p style="padding: 12px 0; color: var(--text-muted);">Loading grandparents...</p>
+            </div>
+            <p id="primaryGrandparentMessage" style="font-size: 0.8rem; margin-top: 12px; display: none;"></p>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; margin-bottom: 24px;">
+            <h3 style="display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px;">
                 Ambient Mode Settings
             </h3>
             <form id="settingsForm" style="display: flex; flex-direction: column; gap: 15px;">
@@ -124,6 +135,7 @@
 
         async function loadMembers() {
             const listDiv = document.getElementById('membersList');
+            const primaryList = document.getElementById('primaryGrandparentList');
             try {
                 const res = await fetch('/api/family/members', {
                     headers: { 'Authorization': `Bearer ${token}` }
@@ -139,11 +151,57 @@
                                 <div style="font-weight: 600;">${m.username}</div>
                                 <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: capitalize;">${m.role}</div>
                             </div>
+                            ${m.is_primary_grandparent ? '<span class="badge badge-pending">Primary</span>' : ''}
                             ${m.is_admin ? '<span class="badge badge-success">Admin</span>' : ''}
                         </div>
                     `).join('');
+
+                    const grandparents = data.members.filter(m => m.role === 'grandparent');
+                    if (grandparents.length === 0) {
+                        primaryList.innerHTML = '<p style="color: var(--text-muted);">No grandparent available yet.</p>';
+                    } else {
+                        primaryList.innerHTML = grandparents.map(m => `
+                            <div class="list-item" style="margin-bottom: 10px;">
+                                <div style="flex: 1;">
+                                    <div style="font-weight: 600;">${m.username}</div>
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">
+                                        ${m.is_primary_grandparent ? 'Current emergency source device' : 'Grandparent device'}
+                                    </div>
+                                </div>
+                                <button
+                                    class="btn-outline"
+                                    style="padding: 8px 14px; ${m.is_primary_grandparent ? 'border-color: var(--purple); color: white; background: rgba(147, 51, 234, 0.2);' : ''}"
+                                    onclick="setPrimaryGrandparent(${m.id})"
+                                >
+                                    ${m.is_primary_grandparent ? 'Selected' : 'Set Primary'}
+                                </button>
+                            </div>
+                        `).join('');
+                    }
                 }
             } catch (e) { console.error(e); }
+        }
+
+        async function setPrimaryGrandparent(memberId) {
+            const msg = document.getElementById('primaryGrandparentMessage');
+            msg.style.display = 'block';
+            msg.style.color = 'var(--text-muted)';
+            msg.innerText = 'Saving...';
+
+            const res = await fetch('/api/family/primary-grandparent', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ member_id: memberId })
+            });
+            const result = await res.json();
+            msg.innerText = result.message;
+            msg.style.color = result.status === 'successful' ? 'var(--success)' : 'var(--danger)';
+            if (result.status === 'successful') {
+                loadMembers();
+            }
         }
 
         document.getElementById('inviteForm').onsubmit = async (e) => {

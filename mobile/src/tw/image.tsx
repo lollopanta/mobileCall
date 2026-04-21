@@ -7,7 +7,6 @@ import { Image as RNImage } from "expo-image";
 const AnimatedExpoImage = Animated.createAnimatedComponent(RNImage);
 
 function CSSImage(props: any) {
-  // @ts-expect-error: Remap objectFit style to contentFit property
   const { objectFit, objectPosition, ...style } =
     StyleSheet.flatten(props.style) || {};
 
@@ -19,7 +18,6 @@ function CSSImage(props: any) {
       source={
         typeof props.source === "string" ? { uri: props.source } : props.source
       }
-      // @ts-expect-error: Style is remapped above
       style={style}
     />
   );

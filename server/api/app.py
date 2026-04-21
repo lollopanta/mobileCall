@@ -17,10 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 import socketio
+from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
 
 # Add the parent directory to sys.path to resolve imports when running as a script
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env')))
 
 from setupDB import add_new_user, get_user, update_profile_image, get_connection
 from api.services.eligibility_service import EligibilityService
@@ -28,7 +30,7 @@ from api.services.image_service import ImageProcessingService
 from api.services.fall_sensor import FallSensorService
 
 # --- Configuration ---
-SECRET_KEY = 'super_secret_key_change_this_later'
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me")
 UPLOAD_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), 'static', 'uploads'))
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -71,7 +73,7 @@ image_processor = ImageProcessingService()
 fall_sensor = FallSensorService()
 # Note: we keep these as dicts in memory as before, though for production 
 # shared state between processes would need Redis/DB.
-connected_users = {} # {sid: {"name": username, "family_id": family_id}}
+connected_users = {} # {sid: {"name": username, "family_id": family_id, "role": role, "user_id": id}}
 
 # --- Helpers ---
 
@@ -106,6 +108,42 @@ def generate_token(username):
     }
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
+def apply_auth_cookies(response: JSONResponse, token: str, username: str):
+    secure_cookie = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+    cookie_kwargs = {
+        "httponly": True,
+        "samesite": "lax",
+        "secure": secure_cookie,
+    }
+    response.set_cookie(key="token", value=token, **cookie_kwargs)
+    response.set_cookie(key="logged_in_user", value=username, samesite="lax", secure=secure_cookie)
+
+def get_family_admin_info_sync(family_id):
+    if not family_id:
+        return {"admin_id": None, "primary_grandparent_id": None, "primary_grandparent_username": None}
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        '''
+        SELECT f.admin_id, f.primary_grandparent_id, u.username AS primary_grandparent_username
+        FROM families f
+        LEFT JOIN users u ON u.id = f.primary_grandparent_id
+        WHERE f.id = ?
+        ''',
+        (family_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return {"admin_id": None, "primary_grandparent_id": None, "primary_grandparent_username": None}
+    return dict(row)
+
+def is_family_admin_sync(user):
+    if not user or not user.get('family_id'):
+        return False
+    family_info = get_family_admin_info_sync(user['family_id'])
+    return family_info['admin_id'] == user['id']
+
 # --- Web Routes ---
 
 @app.get("/", response_class=HTMLResponse)
@@ -114,7 +152,7 @@ async def homepage(request: Request):
 
 @app.get("/api/ping")
 async def ping():
-    return {"status": "successful", "service": "mobile-call-server-fastapi"}
+    return {"status": "successful", "service": "mobile-call-server"}
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_view(request: Request):
@@ -140,8 +178,7 @@ async def register(request: Request):
             "message": f"Registration successful for {uName}",
             "token": token
         })
-        response.set_cookie(key="token", value=token, httponly=False)
-        response.set_cookie(key="logged_in_user", value=uName, httponly=False)
+        apply_auth_cookies(response, token, uName)
         return response
     else:
         return JSONResponse({"status": "unsuccessful", "message": f"Registration failed, username {uName} may be taken"}, status_code=400)
@@ -176,8 +213,7 @@ async def login(request: Request):
                 "is_voip_eligible": bool(user_row['is_voip_eligible'])
             }
         })
-        response.set_cookie(key="token", value=token, httponly=False)
-        response.set_cookie(key="logged_in_user", value=uName, httponly=False)
+        apply_auth_cookies(response, token, uName)
         return response
     else:
         return JSONResponse({"status": "unsuccessful", "message": "Login unsuccessful, password not correct"}, status_code=401)
@@ -204,7 +240,15 @@ async def get_family_settings(current_user = Depends(get_current_user)):
     def _get():
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT google_photos_album_url, idle_timeout FROM families WHERE id = ?', (family_id,))
+        cursor.execute(
+            '''
+            SELECT f.google_photos_album_url, f.idle_timeout, f.primary_grandparent_id, u.username AS primary_grandparent_username
+            FROM families f
+            LEFT JOIN users u ON u.id = f.primary_grandparent_id
+            WHERE f.id = ?
+            ''',
+            (family_id,),
+        )
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
@@ -218,11 +262,12 @@ async def update_family_settings(request: Request, current_user = Depends(get_cu
     album_url = data.get('google_photos_album_url')
     idle_timeout = data.get('idle_timeout', 5)
     
-    if current_user['role'] not in ['caregiver', 'grandparent']:
-        return JSONResponse({"status": "unsuccessful", "message": "Unauthorized role"}, status_code=403)
+    loop = asyncio.get_event_loop()
+    is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
+    if not is_admin:
+        return JSONResponse({"status": "unsuccessful", "message": "Only the family admin can update settings"}, status_code=403)
 
     family_id = current_user['family_id']
-    loop = asyncio.get_event_loop()
     def _update():
         conn = get_connection()
         cursor = conn.cursor()
@@ -306,6 +351,8 @@ async def create_family(request: Request, current_user = Depends(get_current_use
             cursor.execute('INSERT INTO families (name, admin_id) VALUES (?, ?)', (family_name, current_user['id']))
             family_id = cursor.lastrowid
             cursor.execute('UPDATE users SET family_id = ?, role = ? WHERE id = ?', (family_id, admin_role, current_user['id']))
+            if admin_role == 'grandparent':
+                cursor.execute('UPDATE families SET primary_grandparent_id = ? WHERE id = ?', (current_user['id'], family_id))
             conn.commit()
             return family_id
         finally:
@@ -327,14 +374,21 @@ async def get_family_members(current_user = Depends(get_current_user)):
     def _get():
         conn = get_connection()
         cursor = conn.cursor()
-        # Get admin_id to mark who is admin
-        cursor.execute('SELECT admin_id FROM families WHERE id = ?', (family_id,))
+        cursor.execute('SELECT admin_id, primary_grandparent_id FROM families WHERE id = ?', (family_id,))
         family_row = cursor.fetchone()
         admin_id = family_row[0] if family_row else None
+        primary_grandparent_id = family_row[1] if family_row else None
         
         cursor.execute('SELECT id, username, role, profile_image FROM users WHERE family_id = ?', (family_id,))
         rows = cursor.fetchall()
-        members = [{"id": r[0], "username": r[1], "role": r[2], "profile_image": r[3], "is_admin": (r[0] == admin_id)} for r in rows]
+        members = [{
+            "id": r[0],
+            "username": r[1],
+            "role": r[2],
+            "profile_image": r[3],
+            "is_admin": (r[0] == admin_id),
+            "is_primary_grandparent": (r[0] == primary_grandparent_id),
+        } for r in rows]
         conn.close()
         return members
 
@@ -346,13 +400,17 @@ async def invite_member(request: Request, current_user = Depends(get_current_use
     data = await request.json()
     target_username = data.get('username')
     
+    loop = asyncio.get_event_loop()
+    is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
+    if not is_admin:
+        return JSONResponse({"status": "unsuccessful", "message": "Only the family admin can invite members"}, status_code=403)
+
     if not current_user['family_id']:
         return JSONResponse({"status": "unsuccessful", "message": "You must create a family before inviting members"}, status_code=400)
 
     if not target_username:
         return JSONResponse({"status": "unsuccessful", "message": "Username required"}, status_code=400)
 
-    loop = asyncio.get_event_loop()
     def _invite():
         conn = get_connection()
         cursor = conn.cursor()
@@ -400,6 +458,56 @@ async def get_notifications(current_user = Depends(get_current_user)):
     invites = await loop.run_in_executor(None, _get)
     return {"status": "successful", "notifications": invites}
 
+@app.get("/api/family/primary-grandparent")
+async def get_primary_grandparent(current_user = Depends(get_current_user)):
+    family_id = current_user['family_id']
+    if not family_id:
+        return JSONResponse({"status": "unsuccessful", "message": "No family joined"}, status_code=404)
+
+    loop = asyncio.get_event_loop()
+    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, family_id)
+    return {"status": "successful", "primary_grandparent": family_info}
+
+@app.post("/api/family/primary-grandparent")
+async def set_primary_grandparent(request: Request, current_user = Depends(get_current_user)):
+    if not current_user['family_id']:
+        return JSONResponse({"status": "unsuccessful", "message": "No family joined"}, status_code=404)
+
+    loop = asyncio.get_event_loop()
+    is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
+    if not is_admin:
+        return JSONResponse({"status": "unsuccessful", "message": "Only the family admin can choose the primary grandparent"}, status_code=403)
+
+    data = await request.json()
+    member_id = data.get('member_id')
+    if not member_id:
+        return JSONResponse({"status": "unsuccessful", "message": "Member id required"}, status_code=400)
+
+    def _set_primary():
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                'SELECT id, username FROM users WHERE id = ? AND family_id = ? AND role = "grandparent"',
+                (member_id, current_user['family_id']),
+            )
+            member = cursor.fetchone()
+            if not member:
+                return None
+            cursor.execute(
+                'UPDATE families SET primary_grandparent_id = ? WHERE id = ?',
+                (member['id'], current_user['family_id']),
+            )
+            conn.commit()
+            return {"id": member['id'], "username": member['username']}
+        finally:
+            conn.close()
+
+    primary_member = await loop.run_in_executor(None, _set_primary)
+    if not primary_member:
+        return JSONResponse({"status": "unsuccessful", "message": "Choose a grandparent in your family"}, status_code=400)
+    return {"status": "successful", "message": "Primary grandparent updated", "primary_grandparent": primary_member}
+
 @app.get("/api/family/fall-logs")
 async def get_fall_logs(current_user = Depends(get_current_user)):
     family_id = current_user['family_id']
@@ -429,9 +537,12 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
     data = await request.json()
     invite_id = data.get('invite_id')
     response = data.get('response')
+    selected_role = data.get('role')
 
     if response not in ['accepted', 'rejected']:
         return JSONResponse({"status": "unsuccessful", "message": "Invalid response"}, status_code=400)
+    if response == 'accepted' and selected_role not in ['caregiver', 'grandparent']:
+        return JSONResponse({"status": "unsuccessful", "message": "Choose caregiver or grandparent before accepting"}, status_code=400)
 
     loop = asyncio.get_event_loop()
     def _respond():
@@ -444,7 +555,10 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
             family_id = invite[0]
             cursor.execute('UPDATE invitations SET status = ? WHERE id = ?', (response, invite_id))
             if response == 'accepted':
-                cursor.execute('UPDATE users SET family_id = ? WHERE id = ?', (family_id, current_user['id']))
+                cursor.execute(
+                    'UPDATE users SET family_id = ?, role = ? WHERE id = ?',
+                    (family_id, selected_role, current_user['id']),
+                )
             conn.commit()
             return True
         finally:
@@ -459,18 +573,13 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
 @app.get("/api/profile")
 async def get_profile(current_user = Depends(get_current_user)):
     loop = asyncio.get_event_loop()
-    def _is_admin():
-        if not current_user['family_id']: return False
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT admin_id FROM families WHERE id = ?', (current_user['family_id'],))
-        row = cursor.fetchone()
-        conn.close()
-        return row[0] == current_user['id'] if row else False
-    
-    is_admin = await loop.run_in_executor(None, _is_admin)
+    is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
+    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user.get('family_id'))
     user_data = dict(current_user)
     user_data['is_family_admin'] = is_admin
+    user_data['is_primary_grandparent'] = family_info['primary_grandparent_id'] == current_user['id']
+    user_data['family_primary_grandparent_id'] = family_info['primary_grandparent_id']
+    user_data['family_primary_grandparent_username'] = family_info['primary_grandparent_username']
     return {"status": "successful", "user": user_data}
 
 @app.post("/api/profile/update")
@@ -481,6 +590,8 @@ async def update_profile(request: Request, current_user = Depends(get_current_us
     
     if role and role not in ['caregiver', 'grandparent']:
         return JSONResponse({"status": "unsuccessful", "message": "Invalid role. Must be caregiver or grandparent."}, status_code=400)
+    if role and current_user.get('family_id'):
+        return JSONResponse({"status": "unsuccessful", "message": "Role is chosen when creating or joining a family"}, status_code=403)
     
     loop = asyncio.get_event_loop()
     def _update():
@@ -517,8 +628,16 @@ async def upload_profile_photo_direct(image: UploadFile = File(...), current_use
         return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
 
 @app.post("/upload-image")
-async def upload_image(image: UploadFile = File(...), username: str = Form(...)):
-    filename = secure_filename(f"{username}_group_{image.filename}")
+async def upload_image(
+    image: UploadFile = File(...),
+    username: Optional[str] = Form(default=None),
+    current_user = Depends(get_current_user),
+):
+    effective_username = current_user['username']
+    if username and username != effective_username:
+        return JSONResponse({"status": "unsuccessful", "message": "Username mismatch"}, status_code=403)
+
+    filename = secure_filename(f"{effective_username}_group_{image.filename}")
     temp_path = os.path.join(UPLOAD_FOLDER, filename)
     
     import aiofiles
@@ -538,15 +657,15 @@ async def upload_image(image: UploadFile = File(...), username: str = Form(...))
         return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
 
 @app.post("/finalize-crop")
-async def finalize_crop(request: Request):
+async def finalize_crop(request: Request, current_user = Depends(get_current_user)):
     data = await request.json()
-    username = data.get('username')
     image_id = data.get('image_id')
     face = data.get('face')
 
-    if not username or not image_id or not face:
+    if not image_id or not face:
         return JSONResponse({"status": "unsuccessful", "message": "Missing data"}, status_code=400)
 
+    username = current_user['username']
     input_path = os.path.join(UPLOAD_FOLDER, image_id)
     output_filename = f"{username}_profile.jpg"
     output_path = os.path.join(UPLOAD_FOLDER, output_filename)
@@ -616,11 +735,23 @@ async def handle_join(sid, data):
         family_id = user_row['family_id']
         room = f"family_{family_id}"
         await sio.enter_room(sid, room)
-        connected_users[sid] = {"name": username, "family_id": family_id}
+        connected_users[sid] = {
+            "name": username,
+            "family_id": family_id,
+            "role": user_row['role'],
+            "user_id": user_row['id'],
+        }
         
         print(f"[JOIN] {username} joined room {room}")
         
-        family_members = [{"id": s, "name": u["name"]} for s, u in connected_users.items() if u["family_id"] == family_id]
+        family_info = await loop.run_in_executor(None, get_family_admin_info_sync, family_id)
+        family_members = [{
+            "id": s,
+            "name": u["name"],
+            "role": u["role"],
+            "user_id": u["user_id"],
+            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
+        } for s, u in connected_users.items() if u["family_id"] == family_id]
         await sio.emit('user-list', family_members, room=room)
     except Exception as e:
         print(f"Join error: {e}")
@@ -630,7 +761,15 @@ async def handle_request_user_list(sid, data):
     user_info = connected_users.get(sid)
     if user_info:
         family_id = user_info['family_id']
-        family_members = [{"id": s, "name": u["name"]} for s, u in connected_users.items() if u["family_id"] == family_id]
+        loop = asyncio.get_event_loop()
+        family_info = await loop.run_in_executor(None, get_family_admin_info_sync, family_id)
+        family_members = [{
+            "id": s,
+            "name": u["name"],
+            "role": u["role"],
+            "user_id": u["user_id"],
+            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
+        } for s, u in connected_users.items() if u["family_id"] == family_id]
         await sio.emit('user-list', family_members, to=sid)
 
 @sio.on('offer')
@@ -668,7 +807,14 @@ async def handle_disconnect(sid):
     if user_info:
         family_id = user_info['family_id']
         room = f"family_{family_id}"
-        family_members = [{"id": s, "name": u["name"]} for s, u in connected_users.items() if u["family_id"] == family_id]
+        family_info = get_family_admin_info_sync(family_id)
+        family_members = [{
+            "id": s,
+            "name": u["name"],
+            "role": u["role"],
+            "user_id": u["user_id"],
+            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
+        } for s, u in connected_users.items() if u["family_id"] == family_id]
         await sio.emit('user-list', family_members, room=room)
 
 # Mount static files after all routes are defined
@@ -680,4 +826,3 @@ sio_asgi_app = socketio.ASGIApp(sio, app)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api.app:sio_asgi_app", host="0.0.0.0", port=3000, reload=False)
-
