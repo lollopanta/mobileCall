@@ -651,6 +651,7 @@ export default function App() {
 
     socketRef.current.on('offer', async (data) => {
       console.log('OFFER RECEIVED from:', data.fromName);
+      console.log('OFFER PAYLOAD', data?.offer?.type, data?.offer?.sdp ? data.offer.sdp.length : 0, data?.isVideo);
       activeSessionIdRef.current = data.sessionId || null;
       remoteSocketIdRef.current = data.from;
       offerDataRef.current = data;
@@ -877,6 +878,11 @@ export default function App() {
     peerConnectionRef.current.ontrack = (event: any) => setRemoteStream(event.streams[0]);
   };
 
+  const serializeSessionDescription = (description: any) => ({
+    type: description?.type || null,
+    sdp: description?.sdp || null,
+  });
+
   const initiateCall = async (targetId: string, targetName: string, video: boolean) => {
     if (!isVoipEligible) {
       Alert.alert('Ineligible', 'You are not eligible for VoIP calls.');
@@ -905,7 +911,13 @@ export default function App() {
       setupPeerConnection(targetId, stream);
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
-      socketRef.current?.emit('offer', { toUserId: targetId, offer, isVideo: video });
+      const localOffer = serializeSessionDescription(peerConnectionRef.current.localDescription);
+      console.log('EMITTING OFFER', localOffer.type, localOffer.sdp ? localOffer.sdp.length : 0);
+      socketRef.current?.emit('offer', {
+        toUserId: targetId,
+        offer: localOffer,
+        isVideo: video,
+      });
     } catch (e: any) {
       console.error('Call Error:', e);
       Alert.alert('Call Failed', e.message || 'Could not initiate call');
@@ -941,10 +953,18 @@ export default function App() {
 
     setupPeerConnection(data.from, stream, receiveOnly);
     try {
+      if (!data.offer?.type || !data.offer?.sdp) {
+        throw new Error('Missing SDP offer payload');
+      }
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
-      socketRef.current?.emit('answer', { to: data.from, answer, sessionId: data.sessionId });
+      const localAnswer = serializeSessionDescription(peerConnectionRef.current.localDescription);
+      socketRef.current?.emit('answer', {
+        to: data.from,
+        answer: localAnswer,
+        sessionId: data.sessionId,
+      });
     } catch (e) {
       console.error('Accept call error:', e);
       endCall(true);

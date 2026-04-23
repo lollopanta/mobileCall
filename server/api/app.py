@@ -201,6 +201,15 @@ def get_call_session_by_sid_sync(sid):
 def end_call_session_sync(session_id):
     return call_sessions.pop(session_id, None)
 
+def normalize_session_description(payload):
+    if not isinstance(payload, dict):
+        return None
+    sdp_type = payload.get("type")
+    sdp = payload.get("sdp")
+    if not sdp_type or not sdp:
+        return None
+    return {"type": sdp_type, "sdp": sdp}
+
 def client_prefers_html(request: Request) -> bool:
     if request.url.path.startswith("/api/"):
         return False
@@ -999,8 +1008,13 @@ async def handle_offer(sid, data):
     sender_name = user_info['name'] if user_info else "Unknown"
     target_to = data.get('to')
     target_user_id = data.get('toUserId')
+    offer_payload = normalize_session_description(data.get('offer'))
+    is_video = bool(data.get('isVideo'))
 
     if not user_info:
+        return
+    if not offer_payload:
+        print(f"[OFFER] Invalid SDP payload from {sender_name}: {data.get('offer')}")
         return
 
     if target_user_id:
@@ -1029,8 +1043,8 @@ async def handle_offer(sid, data):
         await sio.emit('offer', {
             'from': sid,
             'fromName': sender_name,
-            'offer': data.get('offer'),
-            'isVideo': data.get('isVideo'),
+            'offer': offer_payload,
+            'isVideo': is_video,
             'sessionId': session_id,
         }, to=viewer_sid)
 
@@ -1039,20 +1053,24 @@ async def handle_offer(sid, data):
                 'sessionId': session_id,
                 'phase': 'ringing',
                 'callerName': sender_name,
-                'isVideo': data.get('isVideo'),
+                'isVideo': is_video,
             }, to=controller_sid)
         return
 
     await sio.emit('offer', {
         'from': sid,
         'fromName': sender_name,
-        'offer': data.get('offer'),
-        'isVideo': data.get('isVideo')
+        'offer': offer_payload,
+        'isVideo': is_video
     }, to=target_to)
 
 @sio.on('answer')
 async def handle_answer(sid, data):
     session_id = data.get('sessionId')
+    answer_payload = normalize_session_description(data.get('answer'))
+    if not answer_payload:
+        print(f"[ANSWER] Invalid SDP payload from {sid}: {data.get('answer')}")
+        return
     if session_id and session_id in call_sessions:
         session = call_sessions[session_id]
         if session.get("controller_sid"):
@@ -1061,7 +1079,7 @@ async def handle_answer(sid, data):
                 'phase': 'connected',
                 'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
             }, to=session["controller_sid"])
-    await sio.emit('answer', {'from': sid, 'answer': data.get('answer')}, to=data.get('to'))
+    await sio.emit('answer', {'from': sid, 'answer': answer_payload}, to=data.get('to'))
 
 @sio.on('ice-candidate')
 async def handle_ice_candidate(sid, data):
