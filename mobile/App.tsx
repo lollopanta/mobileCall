@@ -149,6 +149,7 @@ export default function App() {
 
   const socketRef = useRef<Socket | null>(null);
   const peerConnectionRef = useRef<any>(null);
+  const viewerPeerConnectionRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
@@ -156,6 +157,8 @@ export default function App() {
   const offerDataRef = useRef<any>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const currentUserIdRef = useRef<number | null>(null);
+  const viewerSocketIdRef = useRef<string | null>(null);
+  const controllerSocketIdRef = useRef<string | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
@@ -251,6 +254,20 @@ export default function App() {
       handleJoin(authToken, undefined, deviceId);
     } catch (error: any) {
       Alert.alert('Pairing Error', error.response?.data?.message || 'Could not complete pairing');
+    }
+  };
+
+  const disconnectDevicePairing = async () => {
+    const baseUrl = getBaseUrl();
+    try {
+      await axios.post(`${baseUrl}/api/device-pairing/disconnect`, {}, getAuthHeaders());
+      setDevicePairing(null);
+      setDeviceMode(userProfile?.is_primary_grandparent ? 'primary' : 'unpaired');
+      Alert.alert('Disconnected', 'This grandparent device pairing has been removed.');
+      await fetchDevicePairingStatus(authToken, userProfile, deviceId);
+      handleJoin(authToken, undefined, deviceId);
+    } catch (error: any) {
+      Alert.alert('Disconnect Error', error.response?.data?.message || 'Could not disconnect device pairing');
     }
   };
 
@@ -700,9 +717,20 @@ export default function App() {
 
     socketRef.current.on('call-session-started', (data) => {
       activeSessionIdRef.current = data.sessionId || null;
+      viewerSocketIdRef.current = data.viewerSid || null;
+      controllerSocketIdRef.current = data.controllerSid || null;
+      if (data.isVideo && data.viewerSid && data.controllerSid && data.viewerSid !== data.controllerSid && localStreamRef.current) {
+        startViewerMirrorConnection(data.viewerSid).catch((error) => {
+          console.warn('Error starting viewer mirror connection:', error);
+        });
+      }
     });
 
     socketRef.current.on('answer', async (data) => {
+      if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
+        await viewerPeerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+        return;
+      }
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
         remoteSocketIdRef.current = data.from;
@@ -712,6 +740,12 @@ export default function App() {
     });
 
     socketRef.current.on('ice-candidate', async (data) => {
+      if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
+        try {
+          await viewerPeerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) {}
+        return;
+      }
       if (peerConnectionRef.current) {
         try {
           await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
@@ -882,10 +916,38 @@ export default function App() {
     peerConnectionRef.current.ontrack = (event: any) => setRemoteStream(event.streams[0]);
   };
 
+  const setupViewerPeerConnection = (targetId: string, stream: any) => {
+    if (!RTCPeerConnection) return;
+    viewerPeerConnectionRef.current = new RTCPeerConnection(iceServers);
+    stream.getTracks().forEach((track: any) => viewerPeerConnectionRef.current.addTrack(track, stream));
+    viewerPeerConnectionRef.current.onicecandidate = (event: any) => {
+      if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
+    };
+  };
+
   const serializeSessionDescription = (description: any) => ({
     type: description?.type || null,
     sdp: description?.sdp || null,
   });
+
+  const startViewerMirrorConnection = async (viewerSid: string) => {
+    if (!RTCPeerConnection || !localStreamRef.current) return;
+    viewerSocketIdRef.current = viewerSid;
+    if (viewerPeerConnectionRef.current) {
+      viewerPeerConnectionRef.current.close();
+      viewerPeerConnectionRef.current = null;
+    }
+    setupViewerPeerConnection(viewerSid, localStreamRef.current);
+    const offer = await viewerPeerConnectionRef.current.createOffer();
+    await viewerPeerConnectionRef.current.setLocalDescription(offer);
+    const localOffer = serializeSessionDescription(viewerPeerConnectionRef.current.localDescription);
+    socketRef.current?.emit('offer', {
+      to: viewerSid,
+      offer: localOffer,
+      isVideo: true,
+      sessionId: activeSessionIdRef.current,
+    });
+  };
 
   const initiateCall = async (targetId: string, targetName: string, video: boolean) => {
     if (!isVoipEligible) {
@@ -999,6 +1061,10 @@ export default function App() {
       peerConnectionRef.current.close(); 
       peerConnectionRef.current = null; 
     }
+    if (viewerPeerConnectionRef.current) {
+      viewerPeerConnectionRef.current.close();
+      viewerPeerConnectionRef.current = null;
+    }
     if (localStreamRef.current) { 
       localStreamRef.current.getTracks().forEach((t: any) => t.stop()); 
       localStreamRef.current = null; 
@@ -1007,6 +1073,8 @@ export default function App() {
     remoteSocketIdRef.current = null;
     offerDataRef.current = null;
     activeSessionIdRef.current = null;
+    viewerSocketIdRef.current = null;
+    controllerSocketIdRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
     setCallStatus('idle');
@@ -1119,15 +1187,24 @@ export default function App() {
             <Text className="text-purple-400 text-xl font-bold mt-2">{formatDuration(callDuration)}</Text>
           )}
           {isControllerDevice ? (
-            <View className="items-center mt-10 w-full">
-              <Text className="text-text-dim mb-6 text-center">
+            <View className="flex-1 w-full mt-8">
+              <Text className="text-text-dim mb-4 text-center">
                 {callStatus === 'connected'
-                  ? 'The paired viewer device is showing the caregiver stream.'
-                  : 'Connecting the paired viewer device to the caregiver stream.'}
+                  ? 'This paired device is sending camera and microphone. The primary device is showing the remote webcam.'
+                  : 'Preparing camera, microphone, and paired viewer screen.'}
               </Text>
-              <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
-                <MaterialIcons name="call-end" size={32} color="#fff" />
-              </Pressable>
+              <View className="flex-1 rounded-3xl overflow-hidden border border-glass-border bg-black">
+                {Platform.OS === 'web' ? (
+                  <video ref={localVideoRef} autoPlay muted playsInline style={{ flex: 1, backgroundColor: '#000', objectFit: 'cover' } as any} />
+                ) : (
+                  localStream && <RTCView streamURL={localStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit="cover" mirror />
+                )}
+              </View>
+              <View className="items-center mt-6">
+                <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                  <MaterialIcons name="call-end" size={32} color="#fff" />
+                </Pressable>
+              </View>
             </View>
           ) : callStatus === 'ringing' || isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
@@ -1305,24 +1382,34 @@ export default function App() {
                   </Text>
 
                   {deviceMode === 'controller' && (
-                    <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
-                      <Text className="text-white font-bold">Controller device</Text>
-                      <Text className="text-purple-200 mt-1">
-                        Pairing code: {devicePairing?.pairing_code || '...'}
-                      </Text>
-                      <Text className="text-text-dim text-xs mt-2">
-                        {devicePairing?.viewer_paired ? 'Viewer connected.' : 'Enter this code on the second device to finish pairing.'}
-                      </Text>
-                    </View>
+                    <>
+                      <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
+                        <Text className="text-white font-bold">Controller device</Text>
+                        <Text className="text-purple-200 mt-1">
+                          Pairing code: {devicePairing?.pairing_code || '...'}
+                        </Text>
+                        <Text className="text-text-dim text-xs mt-2">
+                          {devicePairing?.viewer_paired ? 'Viewer connected.' : 'Enter this code on the second device to finish pairing.'}
+                        </Text>
+                      </View>
+                      <Pressable className="p-4 rounded-xl bg-red-600 items-center border border-red-700 mb-3" onPress={disconnectDevicePairing}>
+                        <Text className="text-white font-bold">Disconnect Pairing</Text>
+                      </Pressable>
+                    </>
                   )}
 
                   {deviceMode === 'viewer' && (
-                    <View className="mb-4 p-4 rounded-xl bg-emerald-900/30 border border-emerald-800/50">
-                      <Text className="text-white font-bold">Viewer device</Text>
-                      <Text className="text-text-dim text-xs mt-2">
-                        This screen auto-joins the caregiver stream and leaves call controls on the controller device.
-                      </Text>
-                    </View>
+                    <>
+                      <View className="mb-4 p-4 rounded-xl bg-emerald-900/30 border border-emerald-800/50">
+                        <Text className="text-white font-bold">Viewer device</Text>
+                        <Text className="text-text-dim text-xs mt-2">
+                          This screen auto-joins the caregiver stream and leaves call controls on the controller device.
+                        </Text>
+                      </View>
+                      <Pressable className="p-4 rounded-xl bg-red-600 items-center border border-red-700 mb-3" onPress={disconnectDevicePairing}>
+                        <Text className="text-white font-bold">Disconnect Pairing</Text>
+                      </Pressable>
+                    </>
                   )}
 
                   {['unpaired', 'primary', 'standard'].includes(deviceMode) && (

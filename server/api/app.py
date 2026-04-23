@@ -26,7 +26,7 @@ from werkzeug.utils import secure_filename
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env')))
 
-from setupDB import add_new_user, get_user, update_profile_image, get_connection, set_device_config_value, start_device_pairing, get_device_pairing_for_user, get_device_pairing_by_code, complete_device_pairing, get_device_role_for_device
+from setupDB import add_new_user, get_user, update_profile_image, get_connection, set_device_config_value, start_device_pairing, get_device_pairing_for_user, get_device_pairing_by_code, complete_device_pairing, get_device_role_for_device, clear_device_pairing
 from api.services.eligibility_service import EligibilityService
 from api.services.image_service import ImageProcessingService
 from api.services.fall_sensor import FallSensorService
@@ -703,6 +703,19 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
         },
     }
 
+@app.post("/api/device-pairing/disconnect")
+async def disconnect_pairing(current_user = Depends(get_current_user)):
+    if current_user.get("role") != "grandparent" or not current_user.get("family_id"):
+        return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can disconnect device pairing"}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+    pairing = await loop.run_in_executor(None, get_device_pairing_for_user, current_user["family_id"], current_user["id"])
+    if not pairing:
+        return JSONResponse({"status": "unsuccessful", "message": "No paired devices found"}, status_code=404)
+
+    await loop.run_in_executor(None, clear_device_pairing, current_user["family_id"], current_user["id"])
+    return {"status": "successful", "message": "Device pairing disconnected"}
+
 @app.get("/api/family/fall-logs")
 async def get_fall_logs(current_user = Depends(get_current_user)):
     family_id = current_user['family_id']
@@ -1024,8 +1037,10 @@ async def handle_offer(sid, data):
         viewer_device = next((d for d in devices if d.get("device_mode") == "viewer"), None)
         controller_device = next((d for d in devices if d.get("device_mode") == "controller"), None)
         fallback_device = next((d for d in devices if d["sid"] != sid), devices[0])
-        viewer_sid = viewer_device["sid"] if viewer_device else fallback_device["sid"]
-        controller_sid = controller_device["sid"] if controller_device and controller_device["sid"] != viewer_sid else None
+        controller_sid = controller_device["sid"] if controller_device else fallback_device["sid"]
+        viewer_sid = viewer_device["sid"] if viewer_device else None
+        if viewer_sid == controller_sid:
+            viewer_sid = None
         session_id = secrets.token_hex(8)
         call_sessions[session_id] = {
             "caller_sid": sid,
@@ -1036,6 +1051,8 @@ async def handle_offer(sid, data):
         await sio.emit('call-session-started', {
             'sessionId': session_id,
             'viewerSid': viewer_sid,
+            'controllerSid': controller_sid,
+            'isVideo': is_video,
         }, to=sid)
 
         await sio.emit('offer', {
@@ -1044,15 +1061,15 @@ async def handle_offer(sid, data):
             'offer': offer_payload,
             'isVideo': is_video,
             'sessionId': session_id,
-        }, to=viewer_sid)
+        }, to=controller_sid)
 
-        if controller_sid:
+        if viewer_sid:
             await sio.emit('call-controller-state', {
                 'sessionId': session_id,
                 'phase': 'ringing',
                 'callerName': sender_name,
                 'isVideo': is_video,
-            }, to=controller_sid)
+            }, to=viewer_sid)
         return
 
     await sio.emit('offer', {

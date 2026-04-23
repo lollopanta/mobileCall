@@ -305,5 +305,16 @@ def get_device_role_for_device(family_id, grandparent_user_id, device_id):
         return {"device_role": "viewer", "pairing": pairing}
     return {"device_role": "unpaired", "pairing": pairing}
 
+def clear_device_pairing(family_id, grandparent_user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        'DELETE FROM device_pairings WHERE family_id = ? AND grandparent_user_id = ?',
+        (family_id, grandparent_user_id),
+    )
+    conn.commit()
+    conn.close()
+
 if __name__ == "__main__":
     init_db()
