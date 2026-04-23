@@ -153,11 +153,17 @@ def get_device_mode_sync(user, device_id: Optional[str]):
     if user.get("role") != "grandparent":
         return {"device_mode": "standard", "pairing": None}
 
+    pairing_info = get_device_role_for_device(user["family_id"], user["id"], device_id)
+    if pairing_info["device_role"] in ["controller", "viewer"]:
+        return {
+            "device_mode": pairing_info["device_role"],
+            "pairing": pairing_info["pairing"],
+        }
+
     family_info = get_family_admin_info_sync(user["family_id"])
     if family_info["primary_grandparent_id"] == user["id"]:
         return {"device_mode": "primary", "pairing": None}
 
-    pairing_info = get_device_role_for_device(user["family_id"], user["id"], device_id)
     return {
         "device_mode": pairing_info["device_role"],
         "pairing": pairing_info["pairing"],
@@ -648,10 +654,6 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
         return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can start device pairing"}, status_code=400)
 
     loop = asyncio.get_event_loop()
-    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user["family_id"])
-    if family_info["primary_grandparent_id"] == current_user["id"]:
-        return JSONResponse({"status": "unsuccessful", "message": "The primary grandparent device does not use split viewer/controller pairing"}, status_code=400)
-
     data = await request.json()
     device_id = data.get("device_id")
     if not device_id:
@@ -676,10 +678,6 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
         return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can join device pairing"}, status_code=400)
 
     loop = asyncio.get_event_loop()
-    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user["family_id"])
-    if family_info["primary_grandparent_id"] == current_user["id"]:
-        return JSONResponse({"status": "unsuccessful", "message": "The primary grandparent device does not use split viewer/controller pairing"}, status_code=400)
-
     data = await request.json()
     device_id = data.get("device_id")
     pairing_code = (data.get("pairing_code") or "").strip().upper()

@@ -155,6 +155,7 @@ export default function App() {
   const remoteSocketIdRef = useRef<string | null>(null);
   const offerDataRef = useRef<any>(null);
   const activeSessionIdRef = useRef<string | null>(null);
+  const currentUserIdRef = useRef<number | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
@@ -194,6 +195,7 @@ export default function App() {
     socketRef.current?.disconnect();
     setAuthToken(null);
     setUserProfile(null);
+    currentUserIdRef.current = null;
     setIsJoined(false);
     setUsers([]);
     setView('auth');
@@ -328,6 +330,7 @@ export default function App() {
           try {
             const parsedProfile = JSON.parse(savedUserProfile);
             setUserProfile(parsedProfile);
+            currentUserIdRef.current = parsedProfile?.id ?? null;
             setIsVoipEligible(Boolean(parsedProfile?.is_voip_eligible));
           } catch {
             await storage.deleteItem(STORAGE_KEYS.userProfile);
@@ -569,6 +572,7 @@ export default function App() {
     try {
       const res = await axios.get(`${baseUrl}/api/profile`, getAuthHeaders());
       setUserProfile(res.data.user);
+      currentUserIdRef.current = res.data.user?.id ?? null;
       setIsVoipEligible(res.data.user.is_voip_eligible);
       await storage.setItem(STORAGE_KEYS.userProfile, JSON.stringify(res.data.user));
       await fetchDevicePairingStatus(authToken, res.data.user, deviceId);
@@ -646,7 +650,7 @@ export default function App() {
     });
 
     socketRef.current.on('user-list', (list: User[]) => {
-      setUsers(list.filter((u) => u.user_id !== userProfile?.id));
+      setUsers(list.filter((u) => u.user_id !== currentUserIdRef.current));
     });
 
     socketRef.current.on('offer', async (data) => {
@@ -1010,7 +1014,7 @@ export default function App() {
     setView('main');
   };
 
-  const isSplitGrandparent = userProfile?.role === 'grandparent' && !userProfile?.is_primary_grandparent;
+  const isSplitGrandparent = userProfile?.role === 'grandparent';
 
   // --- RENDERING ---
 
@@ -1128,7 +1132,7 @@ export default function App() {
           ) : callStatus === 'ringing' || isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
               {isIncomingCall && (
-                <Pressable onPress={acceptCall} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
+                <Pressable onPress={() => acceptCall()} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
                   <MaterialIcons name="call" size={32} color="#fff" />
                 </Pressable>
               )}
@@ -1297,7 +1301,7 @@ export default function App() {
                 <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
                   <Text className="text-lg font-bold mb-2 text-text-main">Grandparent Device Pairing</Text>
                   <Text className="text-text-dim mb-4">
-                    Non-primary grandparent mode uses two devices automatically: one controller and one viewer.
+                    Any grandparent device can use two-device mode automatically: one controller and one viewer.
                   </Text>
 
                   {deviceMode === 'controller' && (
@@ -1321,8 +1325,16 @@ export default function App() {
                     </View>
                   )}
 
-                  {deviceMode === 'unpaired' && (
+                  {['unpaired', 'primary', 'standard'].includes(deviceMode) && (
                     <>
+                      {deviceMode === 'primary' && (
+                        <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
+                          <Text className="text-white font-bold">Primary grandparent device</Text>
+                          <Text className="text-text-dim text-xs mt-2">
+                            You can still pair a second device. This device will become the controller and the second one will become the viewer.
+                          </Text>
+                        </View>
+                      )}
                       <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700 mb-3" onPress={startDevicePairing}>
                         <Text className="text-white font-bold">Start Pairing On This Device</Text>
                       </Pressable>
