@@ -31,6 +31,25 @@ def ensure_device_config_table(cursor):
         '''
     )
 
+def ensure_device_pairings_table(cursor):
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS device_pairings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            family_id INTEGER NOT NULL,
+            grandparent_user_id INTEGER NOT NULL,
+            controller_device_id TEXT NOT NULL,
+            viewer_device_id TEXT,
+            pairing_code TEXT UNIQUE,
+            status TEXT DEFAULT 'pending',
+            expires_at TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (family_id) REFERENCES families (id),
+            FOREIGN KEY (grandparent_user_id) REFERENCES users (id)
+        )
+        '''
+    )
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -91,6 +110,7 @@ def init_db():
 
     ensure_column(cursor, "families", "primary_grandparent_id", "INTEGER")
     ensure_device_config_table(cursor)
+    ensure_device_pairings_table(cursor)
 
     conn.commit()
 
@@ -182,6 +202,108 @@ def set_device_config_value(key, value):
     )
     conn.commit()
     conn.close()
+
+def start_device_pairing(family_id, grandparent_user_id, controller_device_id, pairing_code, expires_at):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        'DELETE FROM device_pairings WHERE family_id = ? AND grandparent_user_id = ?',
+        (family_id, grandparent_user_id),
+    )
+    cursor.execute(
+        '''
+        INSERT INTO device_pairings (
+            family_id,
+            grandparent_user_id,
+            controller_device_id,
+            viewer_device_id,
+            pairing_code,
+            status,
+            expires_at
+        ) VALUES (?, ?, ?, NULL, ?, 'pending', ?)
+        ''',
+        (family_id, grandparent_user_id, controller_device_id, pairing_code, expires_at),
+    )
+    conn.commit()
+    conn.close()
+
+def get_device_pairing_for_user(family_id, grandparent_user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        '''
+        SELECT *
+        FROM device_pairings
+        WHERE family_id = ? AND grandparent_user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (family_id, grandparent_user_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_device_pairing_by_code(family_id, grandparent_user_id, pairing_code):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        '''
+        SELECT *
+        FROM device_pairings
+        WHERE family_id = ? AND grandparent_user_id = ? AND pairing_code = ?
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (family_id, grandparent_user_id, pairing_code),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def complete_device_pairing(pairing_id, viewer_device_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        '''
+        UPDATE device_pairings
+        SET viewer_device_id = ?, status = 'active'
+        WHERE id = ?
+        ''',
+        (viewer_device_id, pairing_id),
+    )
+    conn.commit()
+    conn.close()
+
+def get_device_role_for_device(family_id, grandparent_user_id, device_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_pairings_table(cursor)
+    cursor.execute(
+        '''
+        SELECT *
+        FROM device_pairings
+        WHERE family_id = ? AND grandparent_user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        ''',
+        (family_id, grandparent_user_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return {"device_role": "unpaired", "pairing": None}
+
+    pairing = dict(row)
+    if pairing["controller_device_id"] == device_id:
+        return {"device_role": "controller", "pairing": pairing}
+    if pairing["viewer_device_id"] == device_id:
+        return {"device_role": "viewer", "pairing": pairing}
+    return {"device_role": "unpaired", "pairing": pairing}
 
 if __name__ == "__main__":
     init_db()

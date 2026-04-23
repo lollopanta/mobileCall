@@ -5,6 +5,7 @@ import sqlite3
 import bcrypt
 import jwt
 import datetime
+import secrets
 from functools import wraps
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -25,7 +26,7 @@ from werkzeug.utils import secure_filename
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env')))
 
-from setupDB import add_new_user, get_user, update_profile_image, get_connection, set_device_config_value
+from setupDB import add_new_user, get_user, update_profile_image, get_connection, set_device_config_value, start_device_pairing, get_device_pairing_for_user, get_device_pairing_by_code, complete_device_pairing, get_device_role_for_device
 from api.services.eligibility_service import EligibilityService
 from api.services.image_service import ImageProcessingService
 from api.services.fall_sensor import FallSensorService
@@ -75,6 +76,7 @@ fall_sensor = FallSensorService()
 # Note: we keep these as dicts in memory as before, though for production 
 # shared state between processes would need Redis/DB.
 connected_users = {} # {sid: {"name": username, "family_id": family_id, "role": role, "user_id": id}}
+call_sessions = {} # {session_id: {"caller_sid": sid, "viewer_sid": sid, "controller_sid": sid|None, "target_user_id": int}}
 
 # --- Helpers ---
 
@@ -144,6 +146,60 @@ def is_family_admin_sync(user):
         return False
     family_info = get_family_admin_info_sync(user['family_id'])
     return family_info['admin_id'] == user['id']
+
+def get_device_mode_sync(user, device_id: Optional[str]):
+    if not user or not user.get('family_id') or not device_id:
+        return {"device_mode": "standard", "pairing": None}
+    if user.get("role") != "grandparent":
+        return {"device_mode": "standard", "pairing": None}
+
+    family_info = get_family_admin_info_sync(user["family_id"])
+    if family_info["primary_grandparent_id"] == user["id"]:
+        return {"device_mode": "primary", "pairing": None}
+
+    pairing_info = get_device_role_for_device(user["family_id"], user["id"], device_id)
+    return {
+        "device_mode": pairing_info["device_role"],
+        "pairing": pairing_info["pairing"],
+    }
+
+def build_family_presence_sync(family_id):
+    family_info = get_family_admin_info_sync(family_id)
+    users_by_id = {}
+    for sid, user in connected_users.items():
+        if user["family_id"] != family_id:
+            continue
+        entry = users_by_id.get(user["user_id"])
+        if not entry:
+            entry = {
+                "id": str(user["user_id"]),
+                "name": user["name"],
+                "role": user["role"],
+                "user_id": user["user_id"],
+                "is_primary_grandparent": user["user_id"] == family_info["primary_grandparent_id"],
+                "device_modes": [],
+            }
+            users_by_id[user["user_id"]] = entry
+        device_mode = user.get("device_mode")
+        if device_mode and device_mode not in entry["device_modes"]:
+            entry["device_modes"].append(device_mode)
+    return list(users_by_id.values())
+
+def get_connected_devices_for_user_sync(family_id, user_id):
+    return [
+        {"sid": sid, **data}
+        for sid, data in connected_users.items()
+        if data["family_id"] == family_id and data["user_id"] == user_id
+    ]
+
+def get_call_session_by_sid_sync(sid):
+    for session_id, session in call_sessions.items():
+        if sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+            return session_id, session
+    return None, None
+
+def end_call_session_sync(session_id):
+    return call_sessions.pop(session_id, None)
 
 def client_prefers_html(request: Request) -> bool:
     if request.url.path.startswith("/api/"):
@@ -562,6 +618,84 @@ async def set_primary_grandparent(request: Request, current_user = Depends(get_c
     await loop.run_in_executor(None, set_device_config_value, "active_primary_grandparent_id", str(primary_member["id"]))
     return {"status": "successful", "message": "Primary grandparent updated", "primary_grandparent": primary_member}
 
+@app.get("/api/device-pairing/status")
+async def get_device_pairing_status(device_id: str, current_user = Depends(get_current_user)):
+    loop = asyncio.get_event_loop()
+    device_state = await loop.run_in_executor(None, get_device_mode_sync, current_user, device_id)
+    pairing = device_state["pairing"]
+    return {
+        "status": "successful",
+        "device_mode": device_state["device_mode"],
+        "pairing": {
+            "status": pairing["status"],
+            "pairing_code": pairing["pairing_code"],
+            "viewer_paired": bool(pairing["viewer_device_id"]),
+        } if pairing else None,
+    }
+
+@app.post("/api/device-pairing/start")
+async def start_pairing(request: Request, current_user = Depends(get_current_user)):
+    if current_user.get("role") != "grandparent" or not current_user.get("family_id"):
+        return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can start device pairing"}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user["family_id"])
+    if family_info["primary_grandparent_id"] == current_user["id"]:
+        return JSONResponse({"status": "unsuccessful", "message": "The primary grandparent device does not use split viewer/controller pairing"}, status_code=400)
+
+    data = await request.json()
+    device_id = data.get("device_id")
+    if not device_id:
+        return JSONResponse({"status": "unsuccessful", "message": "Device id required"}, status_code=400)
+
+    pairing_code = secrets.token_hex(3).upper()
+    expires_at = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=10)).isoformat()
+    await loop.run_in_executor(None, start_device_pairing, current_user["family_id"], current_user["id"], device_id, pairing_code, expires_at)
+    return {
+        "status": "successful",
+        "device_mode": "controller",
+        "pairing": {
+            "pairing_code": pairing_code,
+            "status": "pending",
+            "viewer_paired": False,
+        },
+    }
+
+@app.post("/api/device-pairing/join")
+async def join_pairing(request: Request, current_user = Depends(get_current_user)):
+    if current_user.get("role") != "grandparent" or not current_user.get("family_id"):
+        return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can join device pairing"}, status_code=400)
+
+    loop = asyncio.get_event_loop()
+    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user["family_id"])
+    if family_info["primary_grandparent_id"] == current_user["id"]:
+        return JSONResponse({"status": "unsuccessful", "message": "The primary grandparent device does not use split viewer/controller pairing"}, status_code=400)
+
+    data = await request.json()
+    device_id = data.get("device_id")
+    pairing_code = (data.get("pairing_code") or "").strip().upper()
+    if not device_id or not pairing_code:
+        return JSONResponse({"status": "unsuccessful", "message": "Device id and pairing code required"}, status_code=400)
+
+    pairing = await loop.run_in_executor(None, get_device_pairing_by_code, current_user["family_id"], current_user["id"], pairing_code)
+    if not pairing:
+        return JSONResponse({"status": "unsuccessful", "message": "Pairing code not found"}, status_code=404)
+    if pairing["controller_device_id"] == device_id:
+        return JSONResponse({"status": "unsuccessful", "message": "Use a second device to complete pairing"}, status_code=400)
+    if pairing["viewer_device_id"] and pairing["viewer_device_id"] != device_id:
+        return JSONResponse({"status": "unsuccessful", "message": "A viewer device is already paired"}, status_code=400)
+
+    await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
+    return {
+        "status": "successful",
+        "device_mode": "viewer",
+        "pairing": {
+            "pairing_code": pairing_code,
+            "status": "active",
+            "viewer_paired": True,
+        },
+    }
+
 @app.get("/api/family/fall-logs")
 async def get_fall_logs(current_user = Depends(get_current_user)):
     family_id = current_user['family_id']
@@ -825,6 +959,7 @@ async def handle_join(sid, data):
     try:
         decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         username = decoded['user']
+        device_id = data.get('deviceId')
         loop = asyncio.get_event_loop()
         user_row = await loop.run_in_executor(None, get_user, username)
         if not user_row or not user_row['family_id']: return
@@ -832,23 +967,19 @@ async def handle_join(sid, data):
         family_id = user_row['family_id']
         room = f"family_{family_id}"
         await sio.enter_room(sid, room)
+        device_state = await loop.run_in_executor(None, get_device_mode_sync, user_row, device_id)
         connected_users[sid] = {
             "name": username,
             "family_id": family_id,
             "role": user_row['role'],
             "user_id": user_row['id'],
+            "device_id": device_id,
+            "device_mode": device_state["device_mode"],
         }
         
         print(f"[JOIN] {username} joined room {room}")
-        
-        family_info = await loop.run_in_executor(None, get_family_admin_info_sync, family_id)
-        family_members = [{
-            "id": s,
-            "name": u["name"],
-            "role": u["role"],
-            "user_id": u["user_id"],
-            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
-        } for s, u in connected_users.items() if u["family_id"] == family_id]
+
+        family_members = await loop.run_in_executor(None, build_family_presence_sync, family_id)
         await sio.emit('user-list', family_members, room=room)
     except Exception as e:
         print(f"Join error: {e}")
@@ -859,22 +990,59 @@ async def handle_request_user_list(sid, data):
     if user_info:
         family_id = user_info['family_id']
         loop = asyncio.get_event_loop()
-        family_info = await loop.run_in_executor(None, get_family_admin_info_sync, family_id)
-        family_members = [{
-            "id": s,
-            "name": u["name"],
-            "role": u["role"],
-            "user_id": u["user_id"],
-            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
-        } for s, u in connected_users.items() if u["family_id"] == family_id]
+        family_members = await loop.run_in_executor(None, build_family_presence_sync, family_id)
         await sio.emit('user-list', family_members, to=sid)
 
 @sio.on('offer')
 async def handle_offer(sid, data):
-    target_to = data.get('to')
     user_info = connected_users.get(sid)
     sender_name = user_info['name'] if user_info else "Unknown"
-    
+    target_to = data.get('to')
+    target_user_id = data.get('toUserId')
+
+    if not user_info:
+        return
+
+    if target_user_id:
+        devices = get_connected_devices_for_user_sync(user_info["family_id"], int(target_user_id))
+        if not devices:
+            await sio.emit('call-rejected', {'from': sid}, to=sid)
+            return
+
+        viewer_device = next((d for d in devices if d.get("device_mode") == "viewer"), None)
+        controller_device = next((d for d in devices if d.get("device_mode") == "controller"), None)
+        fallback_device = next((d for d in devices if d["sid"] != sid), devices[0])
+        viewer_sid = viewer_device["sid"] if viewer_device else fallback_device["sid"]
+        controller_sid = controller_device["sid"] if controller_device and controller_device["sid"] != viewer_sid else None
+        session_id = secrets.token_hex(8)
+        call_sessions[session_id] = {
+            "caller_sid": sid,
+            "viewer_sid": viewer_sid,
+            "controller_sid": controller_sid,
+            "target_user_id": int(target_user_id),
+        }
+        await sio.emit('call-session-started', {
+            'sessionId': session_id,
+            'viewerSid': viewer_sid,
+        }, to=sid)
+
+        await sio.emit('offer', {
+            'from': sid,
+            'fromName': sender_name,
+            'offer': data.get('offer'),
+            'isVideo': data.get('isVideo'),
+            'sessionId': session_id,
+        }, to=viewer_sid)
+
+        if controller_sid:
+            await sio.emit('call-controller-state', {
+                'sessionId': session_id,
+                'phase': 'ringing',
+                'callerName': sender_name,
+                'isVideo': data.get('isVideo'),
+            }, to=controller_sid)
+        return
+
     await sio.emit('offer', {
         'from': sid,
         'fromName': sender_name,
@@ -884,6 +1052,15 @@ async def handle_offer(sid, data):
 
 @sio.on('answer')
 async def handle_answer(sid, data):
+    session_id = data.get('sessionId')
+    if session_id and session_id in call_sessions:
+        session = call_sessions[session_id]
+        if session.get("controller_sid"):
+            await sio.emit('call-controller-state', {
+                'sessionId': session_id,
+                'phase': 'connected',
+                'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
+            }, to=session["controller_sid"])
     await sio.emit('answer', {'from': sid, 'answer': data.get('answer')}, to=data.get('to'))
 
 @sio.on('ice-candidate')
@@ -892,26 +1069,43 @@ async def handle_ice_candidate(sid, data):
 
 @sio.on('call-rejected')
 async def handle_call_rejected(sid, data):
+    session_id = data.get('sessionId')
+    if session_id and session_id in call_sessions:
+        session = end_call_session_sync(session_id)
+        if not session:
+            return
+        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+            if target_sid and target_sid != sid:
+                await sio.emit('call-rejected', {'from': sid, 'sessionId': session_id}, to=target_sid)
+        return
     await sio.emit('call-rejected', {'from': sid}, to=data.get('to'))
 
 @sio.on('end-call')
 async def handle_end_call(sid, data):
+    session_id = data.get('sessionId')
+    if session_id and session_id in call_sessions:
+        session = end_call_session_sync(session_id)
+        if not session:
+            return
+        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+            if target_sid and target_sid != sid:
+                await sio.emit('end-call', {'from': sid, 'sessionId': session_id}, to=target_sid)
+        return
     await sio.emit('end-call', {'from': sid}, to=data.get('to'))
 
 @sio.on('disconnect')
 async def handle_disconnect(sid):
     user_info = connected_users.pop(sid, None)
     if user_info:
+        session_id, session = get_call_session_by_sid_sync(sid)
+        if session_id and session:
+            end_call_session_sync(session_id)
+            for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+                if target_sid and target_sid != sid:
+                    await sio.emit('end-call', {'from': sid, 'sessionId': session_id}, to=target_sid)
         family_id = user_info['family_id']
         room = f"family_{family_id}"
-        family_info = get_family_admin_info_sync(family_id)
-        family_members = [{
-            "id": s,
-            "name": u["name"],
-            "role": u["role"],
-            "user_id": u["user_id"],
-            "is_primary_grandparent": u["user_id"] == family_info["primary_grandparent_id"],
-        } for s, u in connected_users.items() if u["family_id"] == family_id]
+        family_members = build_family_presence_sync(family_id)
         await sio.emit('user-list', family_members, room=room)
 
 # Mount static files after all routes are defined

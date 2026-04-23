@@ -10,6 +10,7 @@ import { io, Socket } from 'socket.io-client';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
+import * as SecureStore from 'expo-secure-store';
 import axios from 'axios';
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
@@ -63,6 +64,37 @@ type FamilySettingsState = {
   primary_grandparent_id?: number | null;
   primary_grandparent_username?: string | null;
 };
+type DeviceMode = 'standard' | 'primary' | 'controller' | 'viewer' | 'unpaired';
+
+const STORAGE_KEYS = {
+  serverUrl: 'mobilecall_server_url',
+  authToken: 'mobilecall_auth_token',
+  userProfile: 'mobilecall_user_profile',
+  deviceId: 'mobilecall_device_id',
+};
+
+const storage = {
+  async getItem(key: string) {
+    if (Platform.OS === 'web') {
+      return window.localStorage.getItem(key);
+    }
+    return SecureStore.getItemAsync(key);
+  },
+  async setItem(key: string, value: string) {
+    if (Platform.OS === 'web') {
+      window.localStorage.setItem(key, value);
+      return;
+    }
+    await SecureStore.setItemAsync(key, value);
+  },
+  async deleteItem(key: string) {
+    if (Platform.OS === 'web') {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    await SecureStore.deleteItemAsync(key);
+  },
+};
 
 export default function App() {
   const colorScheme = useColorScheme();
@@ -75,6 +107,10 @@ export default function App() {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [serverIP, setServerIP] = useState('');
+  const [deviceId, setDeviceId] = useState('');
+  const [deviceMode, setDeviceMode] = useState<DeviceMode>('standard');
+  const [devicePairing, setDevicePairing] = useState<any>(null);
+  const [pairingCodeInput, setPairingCodeInput] = useState('');
   const [isVoipEligible, setIsVoipEligible] = useState(false);
   
   // Family & Notifications State
@@ -118,11 +154,103 @@ export default function App() {
   const [remoteStream, setRemoteStream] = useState<any>(null);
   const remoteSocketIdRef = useRef<string | null>(null);
   const offerDataRef = useRef<any>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
   const localVideoRef = useRef<any>(null);
   const remoteVideoRef = useRef<any>(null);
+
+  const persistServerAddress = async (value: string) => {
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
+      await storage.deleteItem(STORAGE_KEYS.serverUrl);
+      return;
+    }
+    await storage.setItem(STORAGE_KEYS.serverUrl, trimmedValue);
+  };
+
+  const persistSession = async (token: string, profile: any, serverAddress: string) => {
+    await Promise.all([
+      storage.setItem(STORAGE_KEYS.authToken, token),
+      storage.setItem(STORAGE_KEYS.userProfile, JSON.stringify(profile)),
+      persistServerAddress(serverAddress),
+    ]);
+  };
+
+  const clearPersistedSession = async () => {
+    await Promise.all([
+      storage.deleteItem(STORAGE_KEYS.authToken),
+      storage.deleteItem(STORAGE_KEYS.userProfile),
+    ]);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await clearPersistedSession();
+    } catch (error) {
+      console.warn('Error clearing saved session:', error);
+    }
+    socketRef.current?.disconnect();
+    setAuthToken(null);
+    setUserProfile(null);
+    setIsJoined(false);
+    setUsers([]);
+    setView('auth');
+  };
+
+  const generateDeviceId = () => `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+  const fetchDevicePairingStatus = async (tokenToUse: string | null = authToken, profileToUse: any = userProfile, deviceIdToUse: string = deviceId) => {
+    if (!tokenToUse || !profileToUse || !deviceIdToUse) return;
+
+    if (profileToUse.role !== 'grandparent' || !profileToUse.family_id) {
+      setDeviceMode('standard');
+      setDevicePairing(null);
+      return;
+    }
+
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await axios.get(`${baseUrl}/api/device-pairing/status`, {
+        headers: { Authorization: `Bearer ${tokenToUse}` },
+        params: { device_id: deviceIdToUse },
+      });
+      setDeviceMode(res.data.device_mode || 'standard');
+      setDevicePairing(res.data.pairing || null);
+    } catch (error) {
+      console.warn('Error loading device pairing status:', error);
+    }
+  };
+
+  const startDevicePairing = async () => {
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await axios.post(`${baseUrl}/api/device-pairing/start`, { device_id: deviceId }, getAuthHeaders());
+      setDeviceMode(res.data.device_mode);
+      setDevicePairing(res.data.pairing);
+      Alert.alert('Controller Ready', `Use code ${res.data.pairing.pairing_code} on the second device to finish pairing.`);
+    } catch (error: any) {
+      Alert.alert('Pairing Error', error.response?.data?.message || 'Could not start pairing');
+    }
+  };
+
+  const joinDevicePairing = async () => {
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await axios.post(`${baseUrl}/api/device-pairing/join`, {
+        device_id: deviceId,
+        pairing_code: pairingCodeInput.trim(),
+      }, getAuthHeaders());
+      setDeviceMode(res.data.device_mode);
+      setDevicePairing(res.data.pairing);
+      setPairingCodeInput('');
+      Alert.alert('Viewer Ready', 'This device is now paired as the viewer screen.');
+      handleJoin(authToken, undefined, deviceId);
+    } catch (error: any) {
+      Alert.alert('Pairing Error', error.response?.data?.message || 'Could not complete pairing');
+    }
+  };
 
   const playRingtone = async () => {
     try {
@@ -166,6 +294,64 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const restoreSession = async () => {
+      try {
+        const [savedServerUrl, savedToken, savedUserProfile, savedDeviceId] = await Promise.all([
+          storage.getItem(STORAGE_KEYS.serverUrl),
+          storage.getItem(STORAGE_KEYS.authToken),
+          storage.getItem(STORAGE_KEYS.userProfile),
+          storage.getItem(STORAGE_KEYS.deviceId),
+        ]);
+
+        if (!isMounted) return;
+
+        if (savedServerUrl) {
+          setServerIP(savedServerUrl);
+        }
+
+        const resolvedDeviceId = savedDeviceId || generateDeviceId();
+        setDeviceId(resolvedDeviceId);
+        if (!savedDeviceId) {
+          await storage.setItem(STORAGE_KEYS.deviceId, resolvedDeviceId);
+        }
+
+        if (!savedToken) {
+          return;
+        }
+
+        setAuthToken(savedToken);
+        if (savedUserProfile) {
+          try {
+            const parsedProfile = JSON.parse(savedUserProfile);
+            setUserProfile(parsedProfile);
+            setIsVoipEligible(Boolean(parsedProfile?.is_voip_eligible));
+          } catch {
+            await storage.deleteItem(STORAGE_KEYS.userProfile);
+          }
+        }
+        setView('main');
+        handleJoin(savedToken, savedServerUrl || undefined, resolvedDeviceId);
+      } catch (error) {
+        console.warn('Error restoring saved session:', error);
+      }
+    };
+
+    restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    persistServerAddress(serverIP).catch((error) => {
+      console.warn('Error saving server address:', error);
+    });
+  }, [serverIP]);
 
   const getBaseUrl = () => {
     if (!serverIP) return 'http://localhost:3000'; // Fallback
@@ -284,10 +470,12 @@ export default function App() {
       } else {
         const res = await axios.post(`${baseUrl}/login`, { username: username.trim(), password });
         const { token, user } = res.data;
+        await persistSession(token, user, serverIP || baseUrl);
         setAuthToken(token);
         setUserProfile(user);
         setIsVoipEligible(user.is_voip_eligible);
-        handleJoin(token);
+        setView('main');
+        handleJoin(token, baseUrl, deviceId);
       }
     } catch (e: any) {
       Alert.alert('Error', e.response?.data?.message || 'Request failed');
@@ -365,6 +553,12 @@ export default function App() {
     }
   }, [authToken, view]);
 
+  useEffect(() => {
+    if (authToken && userProfile && deviceId) {
+      fetchDevicePairingStatus(authToken, userProfile, deviceId);
+    }
+  }, [authToken, userProfile, deviceId]);
+
   const getAuthHeaders = () => ({
     headers: { 'Authorization': `Bearer ${authToken}` }
   });
@@ -376,10 +570,16 @@ export default function App() {
       const res = await axios.get(`${baseUrl}/api/profile`, getAuthHeaders());
       setUserProfile(res.data.user);
       setIsVoipEligible(res.data.user.is_voip_eligible);
+      await storage.setItem(STORAGE_KEYS.userProfile, JSON.stringify(res.data.user));
+      await fetchDevicePairingStatus(authToken, res.data.user, deviceId);
       if (res.data.user.family_id) {
         fetchFamilyMembers();
       }
-    } catch (e) {}
+    } catch (e) {
+      if (axios.isAxiosError(e) && (e.response?.status === 401 || e.response?.status === 403)) {
+        await handleLogout();
+      }
+    }
   };
 
   const fetchNotifications = async () => {
@@ -412,38 +612,60 @@ export default function App() {
     } catch (e) {}
   };
 
-  const handleJoin = (tokenToUse: string | null = authToken) => {
-    const socketUrl = getBaseUrl();
+  const handleJoin = (tokenToUse: string | null = authToken, serverUrlOverride?: string, deviceIdOverride?: string) => {
+    const socketUrl = serverUrlOverride || getBaseUrl();
+    const resolvedDeviceId = deviceIdOverride || deviceId;
     if (socketRef.current) socketRef.current.disconnect();
 
     socketRef.current = io(socketUrl, {
-      transports: ['websocket'],
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
       forceNew: true,
+      secure: socketUrl.startsWith('https://'),
+      timeout: 10000,
+      reconnection: true,
     });
 
     socketRef.current.on('connect', () => {
-      socketRef.current?.emit('join', { token: tokenToUse });
+      socketRef.current?.emit('join', { token: tokenToUse, deviceId: resolvedDeviceId });
       // Request user list after a short delay as a safety net for race conditions
       // where the other device joins at nearly the same time
       setTimeout(() => {
         socketRef.current?.emit('request-user-list', {});
       }, 1500);
       setIsJoined(true);
-      if (view === 'auth') setView('main');
+    });
+
+    socketRef.current.on('connect_error', (error) => {
+      console.warn('Socket connection error:', error.message);
+      setIsJoined(false);
+    });
+
+    socketRef.current.on('disconnect', () => {
+      setIsJoined(false);
     });
 
     socketRef.current.on('user-list', (list: User[]) => {
-      setUsers(list.filter((u) => u.id !== socketRef.current?.id));
+      setUsers(list.filter((u) => u.user_id !== userProfile?.id));
     });
 
     socketRef.current.on('offer', async (data) => {
       console.log('OFFER RECEIVED from:', data.fromName);
-      setCallerName(data.fromName);
-      setIsIncomingCall(true);
-      setCallStatus('ringing');
+      activeSessionIdRef.current = data.sessionId || null;
       remoteSocketIdRef.current = data.from;
       offerDataRef.current = data;
+      setCallerName(data.fromName);
       setView('call');
+
+      if (deviceMode === 'viewer') {
+        setIsIncomingCall(false);
+        setCallStatus('ringing');
+        await acceptCall(data, true);
+        return;
+      }
+
+      setIsIncomingCall(true);
+      setCallStatus('ringing');
       playRingtone();
     });
 
@@ -459,9 +681,26 @@ export default function App() {
       }
     });
 
+    socketRef.current.on('call-controller-state', (data) => {
+      activeSessionIdRef.current = data.sessionId || null;
+      setCallerName(data.callerName || 'Caregiver');
+      setView('call');
+      setIsIncomingCall(false);
+      if (data.phase === 'ringing') {
+        setCallStatus('ringing');
+      } else if (data.phase === 'connected') {
+        setCallStatus('connected');
+      }
+    });
+
+    socketRef.current.on('call-session-started', (data) => {
+      activeSessionIdRef.current = data.sessionId || null;
+    });
+
     socketRef.current.on('answer', async (data) => {
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+        remoteSocketIdRef.current = data.from;
         setCallStatus('connected');
         stopRingtone();
       }
@@ -623,10 +862,15 @@ export default function App() {
     }
   };
 
-  const setupPeerConnection = (targetId: string, stream: any) => {
+  const setupPeerConnection = (targetId: string, stream?: any, receiveOnly = false) => {
     if (!RTCPeerConnection) return;
     peerConnectionRef.current = new RTCPeerConnection(iceServers);
-    stream.getTracks().forEach((track: any) => peerConnectionRef.current.addTrack(track, stream));
+    if (stream) {
+      stream.getTracks().forEach((track: any) => peerConnectionRef.current.addTrack(track, stream));
+    } else if (receiveOnly && peerConnectionRef.current.addTransceiver) {
+      peerConnectionRef.current.addTransceiver('audio', { direction: 'recvonly' });
+      peerConnectionRef.current.addTransceiver('video', { direction: 'recvonly' });
+    }
     peerConnectionRef.current.onicecandidate = (event: any) => {
       if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
     };
@@ -641,7 +885,7 @@ export default function App() {
     try {
       setCallStatus('calling');
       setCallerName(targetName);
-      remoteSocketIdRef.current = targetId;
+      remoteSocketIdRef.current = null;
       setIsVideoEnabled(video);
       setView('call');
       playRingtone();
@@ -661,7 +905,7 @@ export default function App() {
       setupPeerConnection(targetId, stream);
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
-      socketRef.current?.emit('offer', { to: targetId, offer, isVideo: video });
+      socketRef.current?.emit('offer', { toUserId: targetId, offer, isVideo: video });
     } catch (e: any) {
       console.error('Call Error:', e);
       Alert.alert('Call Failed', e.message || 'Could not initiate call');
@@ -670,8 +914,8 @@ export default function App() {
     }
   };
 
-  const acceptCall = async () => {
-    const data = offerDataRef.current;
+  const acceptCall = async (incomingData = offerDataRef.current, receiveOnly = false) => {
+    const data = incomingData;
     if (!data) return;
 
     setIsIncomingCall(false);
@@ -679,11 +923,14 @@ export default function App() {
     remoteSocketIdRef.current = data.from;
     stopRingtone();
 
-    const stream = await startLocalStream(data.isVideo);
-    if (!stream) {
-      socketRef.current?.emit('call-rejected', { to: data.from });
-      endCall(false);
-      return;
+    let stream = null;
+    if (!receiveOnly) {
+      stream = await startLocalStream(data.isVideo);
+      if (!stream) {
+        socketRef.current?.emit('call-rejected', { to: data.from, sessionId: data.sessionId });
+        endCall(false);
+        return;
+      }
     }
 
     if (!RTCPeerConnection) {
@@ -692,12 +939,12 @@ export default function App() {
       return;
     }
 
-    setupPeerConnection(data.from, stream);
+    setupPeerConnection(data.from, stream, receiveOnly);
     try {
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
-      socketRef.current?.emit('answer', { to: data.from, answer });
+      socketRef.current?.emit('answer', { to: data.from, answer, sessionId: data.sessionId });
     } catch (e) {
       console.error('Accept call error:', e);
       endCall(true);
@@ -706,16 +953,20 @@ export default function App() {
 
   const declineCall = () => {
     if (remoteSocketIdRef.current) {
-      socketRef.current?.emit('call-rejected', { to: remoteSocketIdRef.current });
+      socketRef.current?.emit('call-rejected', { to: remoteSocketIdRef.current, sessionId: activeSessionIdRef.current });
     } else if (offerDataRef.current) {
-      socketRef.current?.emit('call-rejected', { to: offerDataRef.current.from });
+      socketRef.current?.emit('call-rejected', { to: offerDataRef.current.from, sessionId: activeSessionIdRef.current });
     }
     endCall(false);
   };
 
   const endCall = (emitEvent = true) => {
-    if (emitEvent && remoteSocketIdRef.current) {
-      socketRef.current?.emit('end-call', { to: remoteSocketIdRef.current });
+    if (emitEvent) {
+      if (activeSessionIdRef.current) {
+        socketRef.current?.emit('end-call', { sessionId: activeSessionIdRef.current });
+      } else if (remoteSocketIdRef.current) {
+        socketRef.current?.emit('end-call', { to: remoteSocketIdRef.current });
+      }
     }
     
     stopRingtone();
@@ -731,12 +982,15 @@ export default function App() {
     
     remoteSocketIdRef.current = null;
     offerDataRef.current = null;
+    activeSessionIdRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
     setCallStatus('idle');
     setIsIncomingCall(false);
     setView('main');
   };
+
+  const isSplitGrandparent = userProfile?.role === 'grandparent' && !userProfile?.is_primary_grandparent;
 
   // --- RENDERING ---
 
@@ -827,25 +1081,42 @@ export default function App() {
   }
 
   if (view === 'call') {
+    const isControllerDevice = deviceMode === 'controller';
+    const isViewerDevice = deviceMode === 'viewer';
     return (
       <SafeAreaView className="flex-1 bg-bg-main">
         <StatusBar style="auto" />
         <View className="flex-grow justify-center items-center p-5">
-          <Text className="text-text-main text-2xl">{isIncomingCall ? 'Incoming Call from' : 'Calling...'}</Text>
+          <Text className="text-text-main text-2xl">
+            {isControllerDevice ? 'Call Controller' : isIncomingCall ? 'Incoming Call from' : 'Calling...'}
+          </Text>
           <Text className="text-text-main text-3xl font-bold">{callerName}</Text>
-          {callStatus === 'connected' && (
+          {(callStatus === 'connected' || isControllerDevice) && (
             <Text className="text-purple-400 text-xl font-bold mt-2">{formatDuration(callDuration)}</Text>
           )}
-          {callStatus === 'ringing' || isIncomingCall ? (
+          {isControllerDevice ? (
+            <View className="items-center mt-10 w-full">
+              <Text className="text-text-dim mb-6 text-center">
+                {callStatus === 'connected'
+                  ? 'The paired viewer device is showing the caregiver stream.'
+                  : 'Connecting the paired viewer device to the caregiver stream.'}
+              </Text>
+              <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                <MaterialIcons name="call-end" size={32} color="#fff" />
+              </Pressable>
+            </View>
+          ) : callStatus === 'ringing' || isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
               {isIncomingCall && (
                 <Pressable onPress={acceptCall} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
                   <MaterialIcons name="call" size={32} color="#fff" />
                 </Pressable>
               )}
-              <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
-                <MaterialIcons name="call-end" size={32} color="#fff" />
-              </Pressable>
+              {!isViewerDevice && (
+                <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                  <MaterialIcons name="call-end" size={32} color="#fff" />
+                </Pressable>
+              )}
             </View>
           ) : (
             <View className="flex-1 w-full relative">
@@ -854,9 +1125,16 @@ export default function App() {
               ) : (
                 remoteStream && <RTCView streamURL={remoteStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit="contain" />
               )}
-              <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
-                <MaterialIcons name="call-end" size={32} color="#fff" />
-              </Pressable>
+              {!isViewerDevice && (
+                <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
+                  <MaterialIcons name="call-end" size={32} color="#fff" />
+                </Pressable>
+              )}
+            </View>
+          )}
+          {isViewerDevice && callStatus === 'connected' && (
+            <View className="absolute bottom-8 self-center bg-black/50 px-4 py-2 rounded-full">
+              <Text className="text-white text-xs">Viewer device</Text>
             </View>
           )}
         </View>
@@ -890,14 +1168,30 @@ export default function App() {
         {/* Header */}
         <View className="p-5 pt-10 bg-bg-card flex-row justify-between items-center border-b border-glass-border">
           <Text className="text-text-main text-xl font-bold tracking-widest">{view.toUpperCase()}</Text>
-          <Pressable onPress={() => { setAuthToken(null); setView('auth'); }}>
-            <MaterialIcons name="logout" size={24} color={colorScheme === 'dark' ? '#fff' : '#000'} />
+          <Pressable onPress={handleLogout}>
+            <MaterialIcons
+              name="logout"
+              size={24}
+              color={colorScheme === 'dark' ? '#fff' : '#000'}
+            />
           </Pressable>
         </View>
 
         <ScrollView className="flex-1">
           {view === 'main' && (
             <View className="p-5">
+              {isSplitGrandparent && (
+                <View className="p-4 bg-amber-900/30 rounded-2xl mb-5 border border-amber-700/40">
+                  <Text className="text-amber-300 font-bold mb-1">Two-device grandparent mode</Text>
+                  <Text className="text-amber-100 text-xs">
+                    {deviceMode === 'controller' && devicePairing?.viewer_paired
+                      ? 'This device controls the call. The paired viewer device shows the caregiver camera.'
+                      : deviceMode === 'viewer'
+                        ? 'This device is the viewer screen for caregiver video.'
+                        : 'Open Family and complete device pairing so one device becomes the controller and the second becomes the viewer.'}
+                  </Text>
+                </View>
+              )}
               {Platform.OS === 'web' && !window.isSecureContext && (
                 <View className="p-4 bg-amber-900/40 rounded-2xl mb-5 border border-amber-800">
                   <Text className="text-amber-300 font-bold mb-1">Insecure Context (HTTP)</Text>
@@ -979,6 +1273,54 @@ export default function App() {
 
           {view === 'family' && (
             <View className="p-5">
+              {isSplitGrandparent && (
+                <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
+                  <Text className="text-lg font-bold mb-2 text-text-main">Grandparent Device Pairing</Text>
+                  <Text className="text-text-dim mb-4">
+                    Non-primary grandparent mode uses two devices automatically: one controller and one viewer.
+                  </Text>
+
+                  {deviceMode === 'controller' && (
+                    <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
+                      <Text className="text-white font-bold">Controller device</Text>
+                      <Text className="text-purple-200 mt-1">
+                        Pairing code: {devicePairing?.pairing_code || '...'}
+                      </Text>
+                      <Text className="text-text-dim text-xs mt-2">
+                        {devicePairing?.viewer_paired ? 'Viewer connected.' : 'Enter this code on the second device to finish pairing.'}
+                      </Text>
+                    </View>
+                  )}
+
+                  {deviceMode === 'viewer' && (
+                    <View className="mb-4 p-4 rounded-xl bg-emerald-900/30 border border-emerald-800/50">
+                      <Text className="text-white font-bold">Viewer device</Text>
+                      <Text className="text-text-dim text-xs mt-2">
+                        This screen auto-joins the caregiver stream and leaves call controls on the controller device.
+                      </Text>
+                    </View>
+                  )}
+
+                  {deviceMode === 'unpaired' && (
+                    <>
+                      <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700 mb-3" onPress={startDevicePairing}>
+                        <Text className="text-white font-bold">Start Pairing On This Device</Text>
+                      </Pressable>
+                      <TextInput
+                        className="w-full p-4 bg-bg-main rounded-xl mb-3 border border-glass-border text-base text-text-main"
+                        placeholder="Enter pairing code from controller device"
+                        value={pairingCodeInput}
+                        onChangeText={setPairingCodeInput}
+                        autoCapitalize="characters"
+                        placeholderTextColor="#666"
+                      />
+                      <Pressable className="p-4 rounded-xl bg-emerald-600 items-center border border-emerald-700" onPress={joinDevicePairing}>
+                        <Text className="text-white font-bold">Join As Viewer Device</Text>
+                      </Pressable>
+                    </>
+                  )}
+                </View>
+              )}
               {!userProfile?.family_id ? (
                 <View className="p-5 bg-bg-card rounded-2xl mb-5 border border-glass-border">
                   <Text className="text-lg font-bold mb-4 text-text-main">Join a Family</Text>
