@@ -76,7 +76,7 @@ fall_sensor = FallSensorService()
 # Note: we keep these as dicts in memory as before, though for production 
 # shared state between processes would need Redis/DB.
 connected_users = {} # {sid: {"name": username, "family_id": family_id, "role": role, "user_id": id}}
-call_sessions = {} # {session_id: {"caller_sid": sid, "viewer_sid": sid, "controller_sid": sid|None, "target_user_id": int}}
+call_sessions = {} # {session_id: {"caller_sid": sid, "viewer_sid": sid, "controller_sid": sid|None, "local_viewer_sid": sid|None, "target_user_id": int}}
 
 # --- Helpers ---
 
@@ -222,7 +222,7 @@ def get_connected_devices_for_user_sync(family_id, user_id):
 
 def get_call_session_by_sid_sync(sid):
     for session_id, session in call_sessions.items():
-        if sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+        if sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid"), session.get("local_viewer_sid")]:
             return session_id, session
     return None, None
 
@@ -1100,11 +1100,13 @@ async def handle_offer(sid, data):
 
     if target_user_id:
         loop = asyncio.get_event_loop()
-        devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], int(target_user_id))
+        target_user_id_int = int(target_user_id)
+        devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], target_user_id_int)
+        caller_devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], user_info["user_id"])
         server_debug("offer-target-user", {
             "from_sid": sid,
             "from_name": sender_name,
-            "target_user_id": int(target_user_id),
+            "target_user_id": target_user_id_int,
             "is_video": is_video,
             "devices": [
                 {
@@ -1114,6 +1116,15 @@ async def handle_offer(sid, data):
                     "username": device.get("name"),
                 }
                 for device in devices
+            ],
+            "caller_devices": [
+                {
+                    "sid": device["sid"],
+                    "device_id": device.get("device_id"),
+                    "device_mode": device.get("device_mode"),
+                    "username": device.get("name"),
+                }
+                for device in caller_devices
             ],
         })
         if not devices:
@@ -1127,24 +1138,37 @@ async def handle_offer(sid, data):
         viewer_sid = viewer_device["sid"] if viewer_device else None
         if viewer_sid == controller_sid:
             viewer_sid = None
+        caller_viewer_device = next(
+            (
+                d for d in caller_devices
+                if d.get("device_mode") == "viewer" and d["sid"] != sid
+            ),
+            None,
+        )
+        local_viewer_sid = caller_viewer_device["sid"] if caller_viewer_device else None
+        if local_viewer_sid == controller_sid:
+            local_viewer_sid = None
         session_id = secrets.token_hex(8)
         call_sessions[session_id] = {
             "caller_sid": sid,
             "viewer_sid": viewer_sid,
             "controller_sid": controller_sid,
-            "target_user_id": int(target_user_id),
+            "local_viewer_sid": local_viewer_sid,
+            "target_user_id": target_user_id_int,
         }
         server_debug("offer-routing", {
             "session_id": session_id,
             "caller_sid": sid,
             "controller_sid": controller_sid,
             "viewer_sid": viewer_sid,
+            "local_viewer_sid": local_viewer_sid,
             "is_video": is_video,
         })
         await sio.emit('call-session-started', {
             'sessionId': session_id,
             'viewerSid': viewer_sid,
             'controllerSid': controller_sid,
+            'localViewerSid': local_viewer_sid,
             'isVideo': is_video,
         }, to=sid)
 
@@ -1163,6 +1187,13 @@ async def handle_offer(sid, data):
                 'callerName': sender_name,
                 'isVideo': is_video,
             }, to=viewer_sid)
+        if local_viewer_sid:
+            await sio.emit('call-controller-state', {
+                'sessionId': session_id,
+                'phase': 'ringing',
+                'callerName': connected_users.get(controller_sid, {}).get("name", sender_name),
+                'isVideo': is_video,
+            }, to=local_viewer_sid)
         return
 
     await sio.emit('offer', {
@@ -1194,6 +1225,12 @@ async def handle_answer(sid, data):
                 'phase': 'connected',
                 'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
             }, to=session["controller_sid"])
+        if session.get("local_viewer_sid"):
+            await sio.emit('call-controller-state', {
+                'sessionId': session_id,
+                'phase': 'connected',
+                'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
+            }, to=session["local_viewer_sid"])
     await sio.emit('answer', {'from': sid, 'answer': answer_payload}, to=data.get('to'))
 
 @sio.on('ice-candidate')
@@ -1207,7 +1244,7 @@ async def handle_call_rejected(sid, data):
         session = end_call_session_sync(session_id)
         if not session:
             return
-        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid"), session.get("local_viewer_sid")]:
             if target_sid and target_sid != sid:
                 await sio.emit('call-rejected', {'from': sid, 'sessionId': session_id}, to=target_sid)
         return
@@ -1225,7 +1262,7 @@ async def handle_end_call(sid, data):
         session = end_call_session_sync(session_id)
         if not session:
             return
-        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+        for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid"), session.get("local_viewer_sid")]:
             if target_sid and target_sid != sid:
                 await sio.emit('end-call', {'from': sid, 'sessionId': session_id}, to=target_sid)
         return
@@ -1245,7 +1282,7 @@ async def handle_disconnect(sid):
         session_id, session = get_call_session_by_sid_sync(sid)
         if session_id and session:
             end_call_session_sync(session_id)
-            for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid")]:
+            for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid"), session.get("local_viewer_sid")]:
                 if target_sid and target_sid != sid:
                     await sio.emit('end-call', {'from': sid, 'sessionId': session_id}, to=target_sid)
         family_id = user_info['family_id']

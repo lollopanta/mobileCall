@@ -808,7 +808,7 @@ export default function App() {
         currentMode: deviceModeRef.current,
       });
       activeSessionIdRef.current = data.sessionId || null;
-      viewerSocketIdRef.current = data.viewerSid || null;
+      viewerSocketIdRef.current = data.localViewerSid || data.viewerSid || null;
       controllerSocketIdRef.current = data.controllerSid || null;
       if (data.isVideo && data.viewerSid && data.controllerSid && data.viewerSid !== data.controllerSid && localStreamRef.current) {
         startViewerMirrorConnection(data.viewerSid).catch((error) => {
@@ -1017,7 +1017,20 @@ export default function App() {
     peerConnectionRef.current.onicecandidate = (event: any) => {
       if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
     };
-    peerConnectionRef.current.ontrack = (event: any) => setRemoteStream(event.streams[0]);
+    peerConnectionRef.current.ontrack = (event: any) => {
+      const incomingStream = event.streams[0];
+      setRemoteStream(incomingStream);
+      if (
+        deviceModeRef.current === 'controller' &&
+        viewerSocketIdRef.current &&
+        incomingStream &&
+        !viewerPeerConnectionRef.current
+      ) {
+        startViewerMirrorConnection(viewerSocketIdRef.current, incomingStream).catch((error) => {
+          console.warn('Error starting controller viewer mirror connection:', error);
+        });
+      }
+    };
   };
 
   const setupViewerPeerConnection = (targetId: string, stream: any) => {
@@ -1034,14 +1047,15 @@ export default function App() {
     sdp: description?.sdp || null,
   });
 
-  const startViewerMirrorConnection = async (viewerSid: string) => {
-    if (!RTCPeerConnection || !localStreamRef.current) return;
+  const startViewerMirrorConnection = async (viewerSid: string, mirrorStream?: any) => {
+    const sourceStream = mirrorStream || localStreamRef.current;
+    if (!RTCPeerConnection || !sourceStream) return;
     viewerSocketIdRef.current = viewerSid;
     if (viewerPeerConnectionRef.current) {
       viewerPeerConnectionRef.current.close();
       viewerPeerConnectionRef.current = null;
     }
-    setupViewerPeerConnection(viewerSid, localStreamRef.current);
+    setupViewerPeerConnection(viewerSid, sourceStream);
     const offer = await viewerPeerConnectionRef.current.createOffer();
     await viewerPeerConnectionRef.current.setLocalDescription(offer);
     const localOffer = serializeSessionDescription(viewerPeerConnectionRef.current.localDescription);
@@ -1056,6 +1070,10 @@ export default function App() {
   const initiateCall = async (targetId: string, targetName: string, video: boolean) => {
     if (!isVoipEligible) {
       Alert.alert('Ineligible', 'You are not eligible for VoIP calls.');
+      return;
+    }
+    if (deviceModeRef.current === 'viewer') {
+      Alert.alert('Unavailable', 'Use the active call device to place calls. This display device is receive-only.');
       return;
     }
     try {
@@ -1330,13 +1348,24 @@ export default function App() {
         <StatusBar style="auto" />
         <View className="flex-grow justify-center items-center p-5">
           <Text className="text-text-main text-2xl">
-            {isControllerDevice ? 'Call Controller' : isIncomingCall ? 'Incoming Call from' : 'Calling...'}
+            {isIncomingCall ? 'Incoming Call from' : isControllerDevice ? 'Call Controller' : 'Calling...'}
           </Text>
           <Text className="text-text-main text-3xl font-bold">{callerName}</Text>
           {(callStatus === 'connected' || isControllerDevice) && (
             <Text className="text-purple-400 text-xl font-bold mt-2">{formatDuration(callDuration)}</Text>
           )}
-          {isControllerDevice ? (
+          {isIncomingCall ? (
+            <View className="flex-row mt-10 gap-5">
+              <Pressable onPress={() => acceptCall()} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
+                <MaterialIcons name="call" size={32} color="#fff" />
+              </Pressable>
+              {!isViewerDevice && (
+                <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                  <MaterialIcons name="call-end" size={32} color="#fff" />
+                </Pressable>
+              )}
+            </View>
+          ) : isControllerDevice ? (
             <View className="flex-1 w-full mt-8">
               <Text className="text-text-dim mb-4 text-center">
                 {callStatus === 'connected'
@@ -1356,13 +1385,8 @@ export default function App() {
                 </Pressable>
               </View>
             </View>
-          ) : callStatus === 'ringing' || isIncomingCall ? (
+          ) : callStatus === 'ringing' ? (
             <View className="flex-row mt-10 gap-5">
-              {isIncomingCall && (
-                <Pressable onPress={() => acceptCall()} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
-                  <MaterialIcons name="call" size={32} color="#fff" />
-                </Pressable>
-              )}
               {!isViewerDevice && (
                 <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
