@@ -158,6 +158,7 @@ export default function App() {
   const activeSessionIdRef = useRef<string | null>(null);
   const currentUserIdRef = useRef<number | null>(null);
   const deviceModeRef = useRef<DeviceMode>('standard');
+  const isVideoCallRef = useRef(false);
   const viewerSocketIdRef = useRef<string | null>(null);
   const controllerSocketIdRef = useRef<string | null>(null);
 
@@ -752,6 +753,8 @@ export default function App() {
       activeSessionIdRef.current = data.sessionId || null;
       remoteSocketIdRef.current = data.from;
       offerDataRef.current = data;
+      isVideoCallRef.current = Boolean(data.isVideo);
+      setIsVideoEnabled(Boolean(data.isVideo));
       setCallerName(data.fromName);
       setView('call');
 
@@ -791,6 +794,10 @@ export default function App() {
         deviceModeRef: deviceModeRef.current,
       });
       activeSessionIdRef.current = data.sessionId || null;
+      if (typeof data.isVideo === 'boolean') {
+        isVideoCallRef.current = data.isVideo;
+        setIsVideoEnabled(Boolean(data.isVideo));
+      }
       setCallerName(data.callerName || 'Caregiver');
       setView('call');
       setIsIncomingCall(false);
@@ -1020,11 +1027,17 @@ export default function App() {
     peerConnectionRef.current.ontrack = (event: any) => {
       const incomingStream = event.streams[0];
       setRemoteStream(incomingStream);
+      const hasVideoTrack = Boolean(
+        incomingStream &&
+        typeof incomingStream.getVideoTracks === 'function' &&
+        incomingStream.getVideoTracks().length > 0
+      );
       if (
         deviceModeRef.current === 'controller' &&
         viewerSocketIdRef.current &&
         incomingStream &&
-        !viewerPeerConnectionRef.current
+        !viewerPeerConnectionRef.current &&
+        (!isVideoCallRef.current || hasVideoTrack)
       ) {
         startViewerMirrorConnection(viewerSocketIdRef.current, incomingStream).catch((error) => {
           console.warn('Error starting controller viewer mirror connection:', error);
@@ -1087,6 +1100,7 @@ export default function App() {
       setCallStatus('calling');
       setCallerName(targetName);
       remoteSocketIdRef.current = null;
+      isVideoCallRef.current = video;
       setIsVideoEnabled(video);
       setView('call');
       playRingtone();
@@ -1243,6 +1257,7 @@ export default function App() {
     activeSessionIdRef.current = null;
     viewerSocketIdRef.current = null;
     controllerSocketIdRef.current = null;
+    isVideoCallRef.current = false;
     setLocalStream(null);
     setRemoteStream(null);
     setCallStatus('idle');

@@ -1200,7 +1200,8 @@ async def handle_offer(sid, data):
         'from': sid,
         'fromName': sender_name,
         'offer': offer_payload,
-        'isVideo': is_video
+        'isVideo': is_video,
+        'sessionId': data.get('sessionId'),
     }, to=target_to)
 
 @sio.on('answer')
