@@ -191,6 +191,28 @@ def build_family_presence_sync(family_id):
             entry["device_modes"].append(device_mode)
     return list(users_by_id.values())
 
+def get_user_by_id_sync(user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def resolve_connected_devices_for_user_sync(family_id, user_id):
+    target_user = get_user_by_id_sync(user_id)
+    devices = []
+    for sid, data in connected_users.items():
+        if data["family_id"] != family_id or data["user_id"] != user_id:
+            continue
+        device = {"sid": sid, **data}
+        if target_user:
+            device_state = get_device_mode_sync(target_user, data.get("device_id"))
+            data["device_mode"] = device_state["device_mode"]
+            device["device_mode"] = device_state["device_mode"]
+        devices.append(device)
+    return devices
+
 def get_connected_devices_for_user_sync(family_id, user_id):
     return [
         {"sid": sid, **data}
@@ -206,6 +228,9 @@ def get_call_session_by_sid_sync(sid):
 
 def end_call_session_sync(session_id):
     return call_sessions.pop(session_id, None)
+
+def refresh_connected_device_modes_sync(family_id, user_id):
+    resolve_connected_devices_for_user_sync(family_id, user_id)
 
 def normalize_session_description(payload):
     if not isinstance(payload, dict):
@@ -662,6 +687,7 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
     pairing_code = secrets.token_hex(3).upper()
     expires_at = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=10)).isoformat()
     await loop.run_in_executor(None, start_device_pairing, current_user["family_id"], current_user["id"], device_id, pairing_code, expires_at)
+    await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
     return {
         "status": "successful",
         "device_mode": "viewer",
@@ -693,6 +719,7 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
         return JSONResponse({"status": "unsuccessful", "message": "A viewer device is already paired"}, status_code=400)
 
     await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
+    await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
     return {
         "status": "successful",
         "device_mode": "controller",
@@ -714,6 +741,7 @@ async def disconnect_pairing(current_user = Depends(get_current_user)):
         return JSONResponse({"status": "unsuccessful", "message": "No paired devices found"}, status_code=404)
 
     await loop.run_in_executor(None, clear_device_pairing, current_user["family_id"], current_user["id"])
+    await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
     return {"status": "successful", "message": "Device pairing disconnected"}
 
 @app.get("/api/family/fall-logs")
@@ -1029,7 +1057,8 @@ async def handle_offer(sid, data):
         return
 
     if target_user_id:
-        devices = get_connected_devices_for_user_sync(user_info["family_id"], int(target_user_id))
+        loop = asyncio.get_event_loop()
+        devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], int(target_user_id))
         if not devices:
             await sio.emit('call-rejected', {'from': sid}, to=sid)
             return

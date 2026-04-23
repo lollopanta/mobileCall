@@ -157,6 +157,7 @@ export default function App() {
   const offerDataRef = useRef<any>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const currentUserIdRef = useRef<number | null>(null);
+  const deviceModeRef = useRef<DeviceMode>('standard');
   const viewerSocketIdRef = useRef<string | null>(null);
   const controllerSocketIdRef = useRef<string | null>(null);
 
@@ -180,6 +181,11 @@ export default function App() {
       storage.setItem(STORAGE_KEYS.userProfile, JSON.stringify(profile)),
       persistServerAddress(serverAddress),
     ]);
+  };
+
+  const updateDeviceMode = (nextMode: DeviceMode) => {
+    deviceModeRef.current = nextMode;
+    setDeviceMode(nextMode);
   };
 
   const clearPersistedSession = async () => {
@@ -210,7 +216,7 @@ export default function App() {
     if (!tokenToUse || !profileToUse || !deviceIdToUse) return;
 
     if (profileToUse.role !== 'grandparent' || !profileToUse.family_id) {
-      setDeviceMode('standard');
+      updateDeviceMode('standard');
       setDevicePairing(null);
       return;
     }
@@ -221,7 +227,7 @@ export default function App() {
         headers: { Authorization: `Bearer ${tokenToUse}` },
         params: { device_id: deviceIdToUse },
       });
-      setDeviceMode(res.data.device_mode || 'standard');
+      updateDeviceMode(res.data.device_mode || 'standard');
       setDevicePairing(res.data.pairing || null);
     } catch (error) {
       console.warn('Error loading device pairing status:', error);
@@ -232,8 +238,9 @@ export default function App() {
     const baseUrl = getBaseUrl();
     try {
       const res = await axios.post(`${baseUrl}/api/device-pairing/start`, { device_id: deviceId }, getAuthHeaders());
-      setDeviceMode(res.data.device_mode);
+      updateDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
+      handleJoin(authToken, undefined, deviceId);
       Alert.alert('Display Device Ready', `Use code ${res.data.pairing.pairing_code} on the second device. The second device will become the active call controller.`);
     } catch (error: any) {
       Alert.alert('Pairing Error', error.response?.data?.message || 'Could not start pairing');
@@ -247,7 +254,7 @@ export default function App() {
         device_id: deviceId,
         pairing_code: pairingCodeInput.trim(),
       }, getAuthHeaders());
-      setDeviceMode(res.data.device_mode);
+      updateDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
       setPairingCodeInput('');
       Alert.alert('Controller Ready', 'This device is now paired as the active call controller.');
@@ -262,7 +269,7 @@ export default function App() {
     try {
       await axios.post(`${baseUrl}/api/device-pairing/disconnect`, {}, getAuthHeaders());
       setDevicePairing(null);
-      setDeviceMode(userProfile?.is_primary_grandparent ? 'primary' : 'unpaired');
+      updateDeviceMode(userProfile?.is_primary_grandparent ? 'primary' : 'unpaired');
       Alert.alert('Disconnected', 'This grandparent device pairing has been removed.');
       await fetchDevicePairingStatus(authToken, userProfile, deviceId);
       handleJoin(authToken, undefined, deviceId);
@@ -366,6 +373,10 @@ export default function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    deviceModeRef.current = deviceMode;
+  }, [deviceMode]);
 
   useEffect(() => {
     persistServerAddress(serverIP).catch((error) => {
@@ -679,7 +690,7 @@ export default function App() {
       setCallerName(data.fromName);
       setView('call');
 
-      if (deviceMode === 'viewer') {
+      if (deviceModeRef.current === 'viewer') {
         setIsIncomingCall(false);
         setCallStatus('ringing');
         await acceptCall(data, true);
