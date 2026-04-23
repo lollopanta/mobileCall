@@ -234,7 +234,7 @@ export default function App() {
       const res = await axios.post(`${baseUrl}/api/device-pairing/start`, { device_id: deviceId }, getAuthHeaders());
       setDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
-      Alert.alert('Controller Ready', `Use code ${res.data.pairing.pairing_code} on the second device to finish pairing.`);
+      Alert.alert('Display Device Ready', `Use code ${res.data.pairing.pairing_code} on the second device. The second device will become the active call controller.`);
     } catch (error: any) {
       Alert.alert('Pairing Error', error.response?.data?.message || 'Could not start pairing');
     }
@@ -250,7 +250,7 @@ export default function App() {
       setDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
       setPairingCodeInput('');
-      Alert.alert('Viewer Ready', 'This device is now paired as the viewer screen.');
+      Alert.alert('Controller Ready', 'This device is now paired as the active call controller.');
       handleJoin(authToken, undefined, deviceId);
     } catch (error: any) {
       Alert.alert('Pairing Error', error.response?.data?.message || 'Could not complete pairing');
@@ -1384,12 +1384,12 @@ export default function App() {
                   {deviceMode === 'controller' && (
                     <>
                       <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
-                        <Text className="text-white font-bold">Controller device</Text>
+                        <Text className="text-white font-bold">Active call device</Text>
                         <Text className="text-purple-200 mt-1">
-                          Pairing code: {devicePairing?.pairing_code || '...'}
+                          Second paired device
                         </Text>
                         <Text className="text-text-dim text-xs mt-2">
-                          {devicePairing?.viewer_paired ? 'Viewer connected.' : 'Enter this code on the second device to finish pairing.'}
+                          This device handles camera, microphone, audio, and call controls.
                         </Text>
                       </View>
                       <Pressable className="p-4 rounded-xl bg-red-600 items-center border border-red-700 mb-3" onPress={disconnectDevicePairing}>
@@ -1401,9 +1401,14 @@ export default function App() {
                   {deviceMode === 'viewer' && (
                     <>
                       <View className="mb-4 p-4 rounded-xl bg-emerald-900/30 border border-emerald-800/50">
-                        <Text className="text-white font-bold">Viewer device</Text>
+                        <Text className="text-white font-bold">Display device</Text>
+                        {devicePairing?.pairing_code ? (
+                          <Text className="text-emerald-200 mt-1">
+                            Pairing code: {devicePairing.pairing_code}
+                          </Text>
+                        ) : null}
                         <Text className="text-text-dim text-xs mt-2">
-                          This screen auto-joins the caregiver stream and leaves call controls on the controller device.
+                          This device shows the remote webcam. The second paired device handles camera, microphone, and call controls.
                         </Text>
                       </View>
                       <Pressable className="p-4 rounded-xl bg-red-600 items-center border border-red-700 mb-3" onPress={disconnectDevicePairing}>
@@ -1418,7 +1423,7 @@ export default function App() {
                         <View className="mb-4 p-4 rounded-xl bg-purple-900/30 border border-purple-800/50">
                           <Text className="text-white font-bold">Primary grandparent device</Text>
                           <Text className="text-text-dim text-xs mt-2">
-                            You can still pair a second device. This device will become the controller and the second one will become the viewer.
+                            You can still pair a second device. This device will become the display device and the second one will become the active call device.
                           </Text>
                         </View>
                       )}
@@ -1434,7 +1439,7 @@ export default function App() {
                         placeholderTextColor="#666"
                       />
                       <Pressable className="p-4 rounded-xl bg-emerald-600 items-center border border-emerald-700" onPress={joinDevicePairing}>
-                        <Text className="text-white font-bold">Join As Viewer Device</Text>
+                        <Text className="text-white font-bold">Join As Active Call Device</Text>
                       </Pressable>
                     </>
                   )}

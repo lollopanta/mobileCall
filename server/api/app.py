@@ -664,7 +664,7 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
     await loop.run_in_executor(None, start_device_pairing, current_user["family_id"], current_user["id"], device_id, pairing_code, expires_at)
     return {
         "status": "successful",
-        "device_mode": "controller",
+        "device_mode": "viewer",
         "pairing": {
             "pairing_code": pairing_code,
             "status": "pending",
@@ -695,7 +695,7 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
     await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
     return {
         "status": "successful",
-        "device_mode": "viewer",
+        "device_mode": "controller",
         "pairing": {
             "pairing_code": pairing_code,
             "status": "active",

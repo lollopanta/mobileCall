@@ -268,13 +268,19 @@ def complete_device_pairing(pairing_id, viewer_device_id):
     conn = get_connection()
     cursor = conn.cursor()
     ensure_device_pairings_table(cursor)
+    cursor.execute('SELECT controller_device_id FROM device_pairings WHERE id = ?', (pairing_id,))
+    existing_pairing = cursor.fetchone()
+    if not existing_pairing:
+        conn.close()
+        return
+    original_device_id = existing_pairing['controller_device_id']
     cursor.execute(
         '''
         UPDATE device_pairings
-        SET viewer_device_id = ?, status = 'active'
+        SET controller_device_id = ?, viewer_device_id = ?, status = 'active'
         WHERE id = ?
         ''',
-        (viewer_device_id, pairing_id),
+        (viewer_device_id, original_device_id, pairing_id),
     )
     conn.commit()
     conn.close()
@@ -299,6 +305,8 @@ def get_device_role_for_device(family_id, grandparent_user_id, device_id):
         return {"device_role": "unpaired", "pairing": None}
 
     pairing = dict(row)
+    if not pairing["viewer_device_id"] and pairing["controller_device_id"] == device_id:
+        return {"device_role": "viewer", "pairing": pairing}
     if pairing["controller_device_id"] == device_id:
         return {"device_role": "controller", "pairing": pairing}
     if pairing["viewer_device_id"] == device_id:
