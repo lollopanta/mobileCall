@@ -24,6 +24,10 @@
                     <option value="grandparent">Grandparent</option>
                 </select>
             </div>
+            <div id="roleHint" class="setup-notice" style="margin-bottom: 20px; padding: 14px 16px; background: rgba(99, 102, 241, 0.08); border-color: rgba(99, 102, 241, 0.22);">
+                <div style="font-weight: 600; margin-bottom: 4px;">Family setup</div>
+                <p id="roleHintText">If you create this family as a grandparent, this device can be assigned as the primary fall-monitoring source immediately.</p>
+            </div>
             <button type="submit" class="submitButton">Create Family</button>
         </form>
         
@@ -34,10 +38,24 @@
 
     <script>
         const token = localStorage.getItem('auth_token');
+        const adminRole = document.getElementById('adminRole');
+        const roleHintText = document.getElementById('roleHintText');
+
+        function updateRoleHint() {
+            if (adminRole.value === 'grandparent') {
+                roleHintText.innerText = 'If you create this family as a grandparent, this device can be assigned as the primary fall-monitoring source immediately.';
+                return;
+            }
+            roleHintText.innerText = 'If you create this family as a caregiver, fall monitoring will stay paused until a grandparent joins the family and is selected as primary.';
+        }
+
+        adminRole.addEventListener('change', updateRoleHint);
+        updateRoleHint();
+
         document.getElementById('createFamilyForm').onsubmit = async (e) => {
             e.preventDefault();
             const name = document.getElementById('familyName').value;
-            const role = document.getElementById('adminRole').value;
+            const role = adminRole.value;
             const res = await fetch('/api/family/create', {
                 method: 'POST',
                 headers: { 

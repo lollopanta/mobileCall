@@ -7,7 +7,7 @@ import sys
 
 # Add parent directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from setupDB import log_fall_event, get_connection
+from setupDB import log_fall_event, get_connection, get_device_config_value
 
 # MPU6050 Registers
 PWR_MGMT_1 = 0x6B
@@ -40,6 +40,7 @@ class FallSensorService:
 
         self.threshold_impact = 2.5 # G-force threshold for impact
         self.threshold_freefall = 0.3 # G-force threshold for freefall
+        self._last_status = None
         
     def read_raw_data(self, addr):
         if not self.bus:
@@ -65,13 +66,36 @@ class FallSensorService:
         z = self.read_raw_data(ACCEL_ZOUT_H) / 16384.0
         return x, y, z
 
+    def _set_status(self, status, message):
+        if self._last_status != status:
+            print(message)
+            self._last_status = status
+
     async def start_monitoring(self, sio_server, grandparent_username):
-        print(f"Starting fall monitoring. Preferred username: {grandparent_username}")
+        preferred_username = grandparent_username.strip() if grandparent_username else None
+        print(f"Starting fall monitoring. Preferred username: {preferred_username or 'auto'}")
 
         def _get_target_user_info():
             conn = get_connection()
             cursor = conn.cursor()
-            if grandparent_username:
+            bound_primary_id = get_device_config_value("active_primary_grandparent_id")
+
+            if bound_primary_id:
+                cursor.execute(
+                    '''
+                    SELECT u.id, u.family_id, u.username
+                    FROM users u
+                    JOIN families f ON f.primary_grandparent_id = u.id
+                    WHERE u.id = ?
+                    ''',
+                    (bound_primary_id,),
+                )
+                res = cursor.fetchone()
+                if res:
+                    conn.close()
+                    return ("BOUND", res)
+
+            if preferred_username:
                 cursor.execute(
                     '''
                     SELECT u.id, u.family_id, u.username
@@ -79,12 +103,12 @@ class FallSensorService:
                     JOIN families f ON f.primary_grandparent_id = u.id
                     WHERE u.username = ?
                     ''',
-                    (grandparent_username,),
+                    (preferred_username,),
                 )
                 res = cursor.fetchone()
                 if res:
                     conn.close()
-                    return res
+                    return ("PREFERRED", res)
 
             cursor.execute(
                 '''
@@ -92,12 +116,15 @@ class FallSensorService:
                 FROM families f
                 JOIN users u ON u.id = f.primary_grandparent_id
                 ORDER BY f.id ASC
-                LIMIT 1
                 '''
             )
-            res = cursor.fetchone()
+            rows = cursor.fetchall()
             conn.close()
-            return res
+            if len(rows) == 1:
+                return ("AUTO", rows[0])
+            if len(rows) > 1:
+                return ("MULTIPLE", len(rows))
+            return ("NONE", None)
 
         def _get_family_caregivers(family_id):
             conn = get_connection()
@@ -111,24 +138,42 @@ class FallSensorService:
             return caregivers
 
         while True:
-            user_info = _get_target_user_info()
-            if not user_info:
-                print("No primary grandparent configured. Fall monitoring is waiting for setup.")
+            selection_mode, user_info = _get_target_user_info()
+            if selection_mode == "NONE":
+                self._set_status(
+                    "waiting-for-primary",
+                    "Fall monitoring paused: no family has a primary grandparent configured yet.",
+                )
+                await asyncio.sleep(10)
+                continue
+            if selection_mode == "MULTIPLE":
+                self._set_status(
+                    "waiting-for-binding",
+                    "Fall monitoring paused: multiple families are configured locally. Open Family Settings on this device and choose the primary grandparent for the family that owns this device.",
+                )
                 await asyncio.sleep(10)
                 continue
 
             grandparent_id, family_id, resolved_username = user_info
             if not family_id:
-                print(f"Configured primary grandparent '{resolved_username}' is not in a family.")
+                self._set_status(
+                    "waiting-for-family",
+                    f"Fall monitoring paused: primary grandparent '{resolved_username}' is not linked to a family.",
+                )
                 await asyncio.sleep(10)
                 continue
 
             if not self.enabled:
-                print("Sensor not enabled, attempting to re-initialize...")
+                self._set_status("sensor-reinit", "Sensor not enabled, attempting to re-initialize...")
                 self.__init__(self.bus_number, self.address)
                 if not self.enabled:
                     await asyncio.sleep(10)
                     continue
+
+            self._set_status(
+                f"monitoring-{grandparent_id}",
+                f"Fall monitoring active for '{resolved_username}' in family {family_id}.",
+            )
 
             try:
                 # Use run_in_executor for blocking I2C reads

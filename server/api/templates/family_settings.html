@@ -13,6 +13,13 @@
             <p>Manage your group members and invitations.</p>
         </div>
 
+        <div
+            id="fallSetupNotice"
+            class="setup-notice"
+            style="display: none; margin-bottom: 24px;"
+            data-is-admin="{{ 'true' if is_family_admin else 'false' }}"
+        ></div>
+
         <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--glass-border); border-radius: 20px; padding: 24px; margin-bottom: 24px;">
             <h3 style="display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px;">
                 Primary Grandparent
@@ -76,6 +83,37 @@
 
     <script>
         const token = localStorage.getItem('auth_token');
+        const fallSetupNotice = document.getElementById('fallSetupNotice');
+        const isFamilyAdmin = fallSetupNotice.dataset.isAdmin === 'true';
+
+        function updateFallSetupNotice(settings, members = []) {
+            const grandparents = members.filter(member => member.role === 'grandparent');
+            const hasPrimary = Boolean(settings && settings.primary_grandparent_id);
+
+            if (hasPrimary) {
+                fallSetupNotice.style.display = 'none';
+                fallSetupNotice.innerHTML = '';
+                return;
+            }
+
+            let message = '';
+            if (grandparents.length === 0) {
+                message = isFamilyAdmin
+                    ? 'Fall detection is paused for this family. Invite a grandparent device first, then choose it as the primary emergency source.'
+                    : 'Fall detection is paused for this family until a grandparent joins.';
+            } else {
+                message = isFamilyAdmin
+                    ? 'Fall detection is paused for this family. Choose a primary grandparent below to activate emergency fall calls on this local device.'
+                    : 'Fall detection is paused until the family admin chooses a primary grandparent.';
+            }
+
+            fallSetupNotice.style.display = 'block';
+            fallSetupNotice.innerHTML = `
+                <div class="badge badge-pending" style="display: inline-flex; margin-bottom: 10px;">Setup Required</div>
+                <div style="font-weight: 600; margin-bottom: 6px;">Local fall monitoring is not active yet.</div>
+                <p style="color: var(--text-muted);">${message}</p>
+            `;
+        }
 
         function setTimeoutValue(val) {
             document.getElementById('idleTimeout').value = val;
@@ -101,6 +139,7 @@
                 if (data.status === 'successful' && data.settings) {
                     document.getElementById('albumUrl').value = data.settings.google_photos_album_url || '';
                     setTimeoutValue(data.settings.idle_timeout || 5);
+                    updateFallSetupNotice(data.settings);
                 }
             } catch (e) { console.error(e); }
         }
@@ -178,6 +217,10 @@
                             </div>
                         `).join('');
                     }
+
+                    updateFallSetupNotice({
+                        primary_grandparent_id: data.members.find(m => m.is_primary_grandparent)?.id || null
+                    }, data.members);
                 }
             } catch (e) { console.error(e); }
         }

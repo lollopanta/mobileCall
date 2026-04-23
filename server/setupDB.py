@@ -21,6 +21,16 @@ def ensure_column(cursor, table_name, column_name, definition):
     if column_name not in columns:
         cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
+def ensure_device_config_table(cursor):
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS device_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        '''
+    )
+
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
@@ -80,6 +90,7 @@ def init_db():
     ''')
 
     ensure_column(cursor, "families", "primary_grandparent_id", "INTEGER")
+    ensure_device_config_table(cursor)
 
     conn.commit()
 
@@ -145,6 +156,30 @@ def log_fall_event(user_id, family_id):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('INSERT INTO fall_logs (user_id, family_id) VALUES (?, ?)', (user_id, family_id))
+    conn.commit()
+    conn.close()
+
+def get_device_config_value(key):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_config_table(cursor)
+    cursor.execute('SELECT value FROM device_config WHERE key = ?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['value'] if row else None
+
+def set_device_config_value(key, value):
+    conn = get_connection()
+    cursor = conn.cursor()
+    ensure_device_config_table(cursor)
+    cursor.execute(
+        '''
+        INSERT INTO device_config (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ''',
+        (key, value),
+    )
     conn.commit()
     conn.close()
 

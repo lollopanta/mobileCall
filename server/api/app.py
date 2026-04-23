@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
@@ -24,7 +25,7 @@ from werkzeug.utils import secure_filename
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env')))
 
-from setupDB import add_new_user, get_user, update_profile_image, get_connection
+from setupDB import add_new_user, get_user, update_profile_image, get_connection, set_device_config_value
 from api.services.eligibility_service import EligibilityService
 from api.services.image_service import ImageProcessingService
 from api.services.fall_sensor import FallSensorService
@@ -48,7 +49,7 @@ sio = socketio.AsyncServer(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Initialize services
-    grandparent_username = os.getenv("GRANDPARENT_USERNAME", "grandparent")
+    grandparent_username = os.getenv("GRANDPARENT_USERNAME")
     asyncio.create_task(fall_sensor.start_monitoring(sio, grandparent_username))
     yield
     # Shutdown: Clean up resources if needed
@@ -143,6 +144,56 @@ def is_family_admin_sync(user):
         return False
     family_info = get_family_admin_info_sync(user['family_id'])
     return family_info['admin_id'] == user['id']
+
+def client_prefers_html(request: Request) -> bool:
+    if request.url.path.startswith("/api/"):
+        return False
+    accept_header = request.headers.get("accept", "")
+    return "text/html" in accept_header or "*/*" in accept_header
+
+def render_error_page(request: Request, status_code: int, title: str, message: str):
+    return templates.TemplateResponse(
+        request,
+        "error.html",
+        {
+            "status_code": status_code,
+            "title": title,
+            "message": message,
+            "logged_in_user": request.cookies.get("logged_in_user"),
+        },
+        status_code=status_code,
+    )
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    messages = {
+        401: ("Sign In Required", "You need to sign in before opening this page."),
+        403: ("Access Denied", "You do not have permission to open this page."),
+        404: ("Page Not Found", "The page you requested does not exist."),
+        500: ("Server Error", "Something went wrong while loading this page."),
+    }
+    title, default_message = messages.get(exc.status_code, ("Request Error", "The request could not be completed."))
+    if client_prefers_html(request):
+        return render_error_page(request, exc.status_code, title, exc.detail or default_message)
+    return JSONResponse(
+        {"status": "unsuccessful", "message": exc.detail or default_message},
+        status_code=exc.status_code,
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"Unhandled server error on {request.url.path}: {exc}")
+    if client_prefers_html(request):
+        return render_error_page(
+            request,
+            500,
+            "Server Error",
+            "Something went wrong while loading this page.",
+        )
+    return JSONResponse(
+        {"status": "unsuccessful", "message": "Internal server error"},
+        status_code=500,
+    )
 
 # --- Web Routes ---
 
@@ -360,6 +411,8 @@ async def create_family(request: Request, current_user = Depends(get_current_use
 
     try:
         family_id = await loop.run_in_executor(None, _create)
+        if admin_role == 'grandparent':
+            await loop.run_in_executor(None, set_device_config_value, "active_primary_grandparent_id", str(current_user['id']))
         return {"status": "successful", "family_id": family_id, "message": f"Family '{family_name}' created"}
     except Exception as e:
         return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
@@ -506,6 +559,7 @@ async def set_primary_grandparent(request: Request, current_user = Depends(get_c
     primary_member = await loop.run_in_executor(None, _set_primary)
     if not primary_member:
         return JSONResponse({"status": "unsuccessful", "message": "Choose a grandparent in your family"}, status_code=400)
+    await loop.run_in_executor(None, set_device_config_value, "active_primary_grandparent_id", str(primary_member["id"]))
     return {"status": "successful", "message": "Primary grandparent updated", "primary_grandparent": primary_member}
 
 @app.get("/api/family/fall-logs")
@@ -551,21 +605,39 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
         try:
             cursor.execute('SELECT family_id FROM invitations WHERE id = ? AND receiver_id = ?', (invite_id, current_user['id']))
             invite = cursor.fetchone()
-            if not invite: return False
+            if not invite:
+                return {"success": False}
             family_id = invite[0]
             cursor.execute('UPDATE invitations SET status = ? WHERE id = ?', (response, invite_id))
+            auto_assigned_primary = False
             if response == 'accepted':
                 cursor.execute(
                     'UPDATE users SET family_id = ?, role = ? WHERE id = ?',
                     (family_id, selected_role, current_user['id']),
                 )
+                if selected_role == 'grandparent':
+                    cursor.execute('SELECT primary_grandparent_id FROM families WHERE id = ?', (family_id,))
+                    family_row = cursor.fetchone()
+                    if family_row and not family_row['primary_grandparent_id']:
+                        cursor.execute(
+                            'UPDATE families SET primary_grandparent_id = ? WHERE id = ?',
+                            (current_user['id'], family_id),
+                        )
+                        auto_assigned_primary = True
             conn.commit()
-            return True
+            return {
+                "success": True,
+                "family_id": family_id,
+                "auto_assigned_primary": auto_assigned_primary,
+            }
         finally:
             conn.close()
 
-    success = await loop.run_in_executor(None, _respond)
-    if success: return {"status": "successful", "message": f"Invitation {response}"}
+    result = await loop.run_in_executor(None, _respond)
+    if result["success"] and response == 'accepted' and selected_role == 'grandparent' and result["auto_assigned_primary"]:
+        await loop.run_in_executor(None, set_device_config_value, "active_primary_grandparent_id", str(current_user['id']))
+    if result["success"]:
+        return {"status": "successful", "message": f"Invitation {response}"}
     return JSONResponse({"status": "unsuccessful", "message": "Invitation not found"}, status_code=404)
 
 # --- Profile and Image API ---
@@ -702,12 +774,37 @@ async def create_family_view(request: Request):
 
 @app.get("/family/settings", response_class=HTMLResponse)
 async def family_settings_view(request: Request):
-    logged_user = request.cookies.get("logged_in_user")
-    if not logged_user: return RedirectResponse(url="/login")
     loop = asyncio.get_event_loop()
-    user_data = await loop.run_in_executor(None, get_user, logged_user)
-    if not user_data['family_id']: return RedirectResponse(url="/family/create")
-    return templates.TemplateResponse(request, "family_settings.html", {"user": user_data, "logged_in_user": logged_user})
+    try:
+        current_user = await get_current_user(request)
+    except HTTPException:
+        response = RedirectResponse(url="/login", status_code=303)
+        response.delete_cookie("token")
+        response.delete_cookie("logged_in_user")
+        return response
+
+    user_data = await loop.run_in_executor(None, get_user, current_user['username'])
+    if not user_data:
+        response = RedirectResponse(url="/login", status_code=303)
+        response.delete_cookie("token")
+        response.delete_cookie("logged_in_user")
+        return response
+
+    if not user_data['family_id']:
+        return RedirectResponse(url="/family/create", status_code=303)
+
+    is_admin = await loop.run_in_executor(None, is_family_admin_sync, user_data)
+    family_info = await loop.run_in_executor(None, get_family_admin_info_sync, user_data['family_id'])
+    return templates.TemplateResponse(
+        request,
+        "family_settings.html",
+        {
+            "user": user_data,
+            "logged_in_user": user_data["username"],
+            "is_family_admin": is_admin,
+            "family_info": family_info,
+        },
+    )
 
 @app.get("/notifications", response_class=HTMLResponse)
 async def notifications_page(request: Request):
