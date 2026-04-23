@@ -166,6 +166,14 @@ export default function App() {
   const localVideoRef = useRef<any>(null);
   const remoteVideoRef = useRef<any>(null);
 
+  const debugLog = (label: string, payload?: any) => {
+    if (payload === undefined) {
+      console.log(`[PAIR-DEBUG] ${label}`);
+      return;
+    }
+    console.log(`[PAIR-DEBUG] ${label}`, payload);
+  };
+
   const persistServerAddress = async (value: string) => {
     const trimmedValue = value.trim();
     if (!trimmedValue) {
@@ -184,6 +192,11 @@ export default function App() {
   };
 
   const updateDeviceMode = (nextMode: DeviceMode) => {
+    debugLog('updateDeviceMode', {
+      previousMode: deviceModeRef.current,
+      nextMode,
+      deviceId,
+    });
     deviceModeRef.current = nextMode;
     setDeviceMode(nextMode);
   };
@@ -213,6 +226,12 @@ export default function App() {
   const generateDeviceId = () => `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
   const fetchDevicePairingStatus = async (tokenToUse: string | null = authToken, profileToUse: any = userProfile, deviceIdToUse: string = deviceId) => {
+    debugLog('fetchDevicePairingStatus:start', {
+      deviceId: deviceIdToUse,
+      role: profileToUse?.role,
+      familyId: profileToUse?.family_id,
+      username: profileToUse?.username,
+    });
     if (!tokenToUse || !profileToUse || !deviceIdToUse) return;
 
     if (profileToUse.role !== 'grandparent' || !profileToUse.family_id) {
@@ -227,6 +246,7 @@ export default function App() {
         headers: { Authorization: `Bearer ${tokenToUse}` },
         params: { device_id: deviceIdToUse },
       });
+      debugLog('fetchDevicePairingStatus:response', res.data);
       updateDeviceMode(res.data.device_mode || 'standard');
       setDevicePairing(res.data.pairing || null);
     } catch (error) {
@@ -237,7 +257,9 @@ export default function App() {
   const startDevicePairing = async () => {
     const baseUrl = getBaseUrl();
     try {
+      debugLog('startDevicePairing:request', { deviceId, currentMode: deviceModeRef.current });
       const res = await axios.post(`${baseUrl}/api/device-pairing/start`, { device_id: deviceId }, getAuthHeaders());
+      debugLog('startDevicePairing:response', res.data);
       updateDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
       handleJoin(authToken, undefined, deviceId);
@@ -250,10 +272,16 @@ export default function App() {
   const joinDevicePairing = async () => {
     const baseUrl = getBaseUrl();
     try {
+      debugLog('joinDevicePairing:request', {
+        deviceId,
+        pairingCode: pairingCodeInput.trim(),
+        currentMode: deviceModeRef.current,
+      });
       const res = await axios.post(`${baseUrl}/api/device-pairing/join`, {
         device_id: deviceId,
         pairing_code: pairingCodeInput.trim(),
       }, getAuthHeaders());
+      debugLog('joinDevicePairing:response', res.data);
       updateDeviceMode(res.data.device_mode);
       setDevicePairing(res.data.pairing);
       setPairingCodeInput('');
@@ -267,6 +295,7 @@ export default function App() {
   const disconnectDevicePairing = async () => {
     const baseUrl = getBaseUrl();
     try {
+      debugLog('disconnectDevicePairing:request', { deviceId, currentMode: deviceModeRef.current });
       await axios.post(`${baseUrl}/api/device-pairing/disconnect`, {}, getAuthHeaders());
       setDevicePairing(null);
       updateDeviceMode(userProfile?.is_primary_grandparent ? 'primary' : 'unpaired');
@@ -647,6 +676,13 @@ export default function App() {
   const handleJoin = (tokenToUse: string | null = authToken, serverUrlOverride?: string, deviceIdOverride?: string) => {
     const socketUrl = serverUrlOverride || getBaseUrl();
     const resolvedDeviceId = deviceIdOverride || deviceId;
+    debugLog('handleJoin:init', {
+      socketUrl,
+      resolvedDeviceId,
+      currentMode: deviceModeRef.current,
+      username: userProfile?.username,
+      userId: currentUserIdRef.current,
+    });
     if (socketRef.current) socketRef.current.disconnect();
 
     socketRef.current = io(socketUrl, {
@@ -659,6 +695,11 @@ export default function App() {
     });
 
     socketRef.current.on('connect', () => {
+      debugLog('socket:connect', {
+        socketId: socketRef.current?.id,
+        deviceId: resolvedDeviceId,
+        currentMode: deviceModeRef.current,
+      });
       socketRef.current?.emit('join', { token: tokenToUse, deviceId: resolvedDeviceId });
       // Request user list after a short delay as a safety net for race conditions
       // where the other device joins at nearly the same time
@@ -669,21 +710,45 @@ export default function App() {
     });
 
     socketRef.current.on('connect_error', (error) => {
+      debugLog('socket:connect_error', {
+        message: error.message,
+        deviceId: resolvedDeviceId,
+        currentMode: deviceModeRef.current,
+      });
       console.warn('Socket connection error:', error.message);
       setIsJoined(false);
     });
 
     socketRef.current.on('disconnect', () => {
+      debugLog('socket:disconnect', {
+        socketId: socketRef.current?.id,
+        deviceId: resolvedDeviceId,
+        currentMode: deviceModeRef.current,
+      });
       setIsJoined(false);
     });
 
     socketRef.current.on('user-list', (list: User[]) => {
+      debugLog('socket:user-list', {
+        currentUserId: currentUserIdRef.current,
+        currentMode: deviceModeRef.current,
+        users: list.map((u) => ({ id: u.id, user_id: u.user_id, name: u.name, role: u.role })),
+      });
       setUsers(list.filter((u) => u.user_id !== currentUserIdRef.current));
     });
 
     socketRef.current.on('offer', async (data) => {
-      console.log('OFFER RECEIVED from:', data.fromName);
-      console.log('OFFER PAYLOAD', data?.offer?.type, data?.offer?.sdp ? data.offer.sdp.length : 0, data?.isVideo);
+      debugLog('socket:offer', {
+        from: data.from,
+        fromName: data.fromName,
+        sessionId: data.sessionId,
+        isVideo: data?.isVideo,
+        offerType: data?.offer?.type,
+        offerLength: data?.offer?.sdp ? data.offer.sdp.length : 0,
+        deviceId: resolvedDeviceId,
+        deviceModeState: deviceMode,
+        deviceModeRef: deviceModeRef.current,
+      });
       activeSessionIdRef.current = data.sessionId || null;
       remoteSocketIdRef.current = data.from;
       offerDataRef.current = data;
@@ -691,6 +756,10 @@ export default function App() {
       setView('call');
 
       if (deviceModeRef.current === 'viewer') {
+        debugLog('socket:offer:auto_accept_viewer', {
+          sessionId: data.sessionId,
+          deviceId: resolvedDeviceId,
+        });
         setIsIncomingCall(false);
         setCallStatus('ringing');
         await acceptCall(data, true);
@@ -715,6 +784,12 @@ export default function App() {
     });
 
     socketRef.current.on('call-controller-state', (data) => {
+      debugLog('socket:call-controller-state', {
+        ...data,
+        deviceId: resolvedDeviceId,
+        deviceModeState: deviceMode,
+        deviceModeRef: deviceModeRef.current,
+      });
       activeSessionIdRef.current = data.sessionId || null;
       setCallerName(data.callerName || 'Caregiver');
       setView('call');
@@ -727,6 +802,11 @@ export default function App() {
     });
 
     socketRef.current.on('call-session-started', (data) => {
+      debugLog('socket:call-session-started', {
+        ...data,
+        deviceId: resolvedDeviceId,
+        currentMode: deviceModeRef.current,
+      });
       activeSessionIdRef.current = data.sessionId || null;
       viewerSocketIdRef.current = data.viewerSid || null;
       controllerSocketIdRef.current = data.controllerSid || null;
@@ -738,6 +818,14 @@ export default function App() {
     });
 
     socketRef.current.on('answer', async (data) => {
+      debugLog('socket:answer', {
+        from: data.from,
+        hasAnswer: Boolean(data.answer?.sdp),
+        answerType: data.answer?.type,
+        currentMode: deviceModeRef.current,
+        viewerSocketId: viewerSocketIdRef.current,
+        controllerSocketId: controllerSocketIdRef.current,
+      });
       if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
         await viewerPeerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
         return;
@@ -751,6 +839,11 @@ export default function App() {
     });
 
     socketRef.current.on('ice-candidate', async (data) => {
+      debugLog('socket:ice-candidate', {
+        from: data.from,
+        currentMode: deviceModeRef.current,
+        isViewerCandidate: data.from === viewerSocketIdRef.current,
+      });
       if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
         try {
           await viewerPeerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
@@ -966,6 +1059,13 @@ export default function App() {
       return;
     }
     try {
+      debugLog('initiateCall:start', {
+        targetId,
+        targetName,
+        video,
+        deviceId,
+        currentMode: deviceModeRef.current,
+      });
       setCallStatus('calling');
       setCallerName(targetName);
       remoteSocketIdRef.current = null;
@@ -989,7 +1089,12 @@ export default function App() {
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
       const localOffer = serializeSessionDescription(peerConnectionRef.current.localDescription);
-      console.log('EMITTING OFFER', localOffer.type, localOffer.sdp ? localOffer.sdp.length : 0);
+      debugLog('initiateCall:emit_offer', {
+        targetId,
+        type: localOffer.type,
+        sdpLength: localOffer.sdp ? localOffer.sdp.length : 0,
+        currentMode: deviceModeRef.current,
+      });
       socketRef.current?.emit('offer', {
         toUserId: targetId,
         offer: localOffer,
@@ -1005,6 +1110,18 @@ export default function App() {
 
   const acceptCall = async (incomingData = offerDataRef.current, receiveOnly = false) => {
     const data = incomingData;
+    debugLog('acceptCall:start', {
+      hasData: Boolean(data),
+      receiveOnly,
+      deviceId,
+      deviceModeState: deviceMode,
+      deviceModeRef: deviceModeRef.current,
+      sessionId: data?.sessionId,
+      from: data?.from,
+      isVideo: data?.isVideo,
+      offerType: data?.offer?.type,
+      offerLength: data?.offer?.sdp ? data.offer.sdp.length : 0,
+    });
     if (!data) return;
 
     setIsIncomingCall(false);
@@ -1031,12 +1148,26 @@ export default function App() {
     setupPeerConnection(data.from, stream, receiveOnly);
     try {
       if (!data.offer?.type || !data.offer?.sdp) {
+        debugLog('acceptCall:missing_offer_payload', {
+          dataKeys: Object.keys(data || {}),
+          offerPayload: data.offer,
+          deviceId,
+          deviceModeRef: deviceModeRef.current,
+        });
         throw new Error('Missing SDP offer payload');
       }
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
       const localAnswer = serializeSessionDescription(peerConnectionRef.current.localDescription);
+      debugLog('acceptCall:emit_answer', {
+        to: data.from,
+        sessionId: data.sessionId,
+        type: localAnswer.type,
+        sdpLength: localAnswer.sdp ? localAnswer.sdp.length : 0,
+        receiveOnly,
+        currentMode: deviceModeRef.current,
+      });
       socketRef.current?.emit('answer', {
         to: data.from,
         answer: localAnswer,
@@ -1058,6 +1189,14 @@ export default function App() {
   };
 
   const endCall = (emitEvent = true) => {
+    debugLog('endCall', {
+      emitEvent,
+      sessionId: activeSessionIdRef.current,
+      remoteSocketId: remoteSocketIdRef.current,
+      viewerSocketId: viewerSocketIdRef.current,
+      controllerSocketId: controllerSocketIdRef.current,
+      currentMode: deviceModeRef.current,
+    });
     if (emitEvent) {
       if (activeSessionIdRef.current) {
         socketRef.current?.emit('end-call', { sessionId: activeSessionIdRef.current });

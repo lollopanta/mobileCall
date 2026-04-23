@@ -241,6 +241,12 @@ def normalize_session_description(payload):
         return None
     return {"type": sdp_type, "sdp": sdp}
 
+def server_debug(label, payload=None):
+    if payload is None:
+        print(f"[PAIR-SERVER] {label}")
+        return
+    print(f"[PAIR-SERVER] {label}: {payload}")
+
 def client_prefers_html(request: Request) -> bool:
     if request.url.path.startswith("/api/"):
         return False
@@ -663,6 +669,13 @@ async def get_device_pairing_status(device_id: str, current_user = Depends(get_c
     loop = asyncio.get_event_loop()
     device_state = await loop.run_in_executor(None, get_device_mode_sync, current_user, device_id)
     pairing = device_state["pairing"]
+    server_debug("device-pairing-status", {
+        "user_id": current_user["id"],
+        "username": current_user["username"],
+        "device_id": device_id,
+        "device_mode": device_state["device_mode"],
+        "pairing": pairing,
+    })
     return {
         "status": "successful",
         "device_mode": device_state["device_mode"],
@@ -681,6 +694,11 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
     loop = asyncio.get_event_loop()
     data = await request.json()
     device_id = data.get("device_id")
+    server_debug("start-pairing-request", {
+        "user_id": current_user["id"],
+        "username": current_user["username"],
+        "device_id": device_id,
+    })
     if not device_id:
         return JSONResponse({"status": "unsuccessful", "message": "Device id required"}, status_code=400)
 
@@ -688,6 +706,12 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
     expires_at = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=10)).isoformat()
     await loop.run_in_executor(None, start_device_pairing, current_user["family_id"], current_user["id"], device_id, pairing_code, expires_at)
     await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
+    server_debug("start-pairing-created", {
+        "user_id": current_user["id"],
+        "device_id": device_id,
+        "pairing_code": pairing_code,
+        "expires_at": expires_at,
+    })
     return {
         "status": "successful",
         "device_mode": "viewer",
@@ -707,10 +731,17 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
     data = await request.json()
     device_id = data.get("device_id")
     pairing_code = (data.get("pairing_code") or "").strip().upper()
+    server_debug("join-pairing-request", {
+        "user_id": current_user["id"],
+        "username": current_user["username"],
+        "device_id": device_id,
+        "pairing_code": pairing_code,
+    })
     if not device_id or not pairing_code:
         return JSONResponse({"status": "unsuccessful", "message": "Device id and pairing code required"}, status_code=400)
 
     pairing = await loop.run_in_executor(None, get_device_pairing_by_code, current_user["family_id"], current_user["id"], pairing_code)
+    server_debug("join-pairing-found", pairing)
     if not pairing:
         return JSONResponse({"status": "unsuccessful", "message": "Pairing code not found"}, status_code=404)
     if pairing["controller_device_id"] == device_id:
@@ -720,6 +751,11 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
 
     await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
     await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
+    server_debug("join-pairing-completed", {
+        "user_id": current_user["id"],
+        "controller_device_id": device_id,
+        "pairing_id": pairing["id"],
+    })
     return {
         "status": "successful",
         "device_mode": "controller",
@@ -1024,7 +1060,13 @@ async def handle_join(sid, data):
             "device_id": device_id,
             "device_mode": device_state["device_mode"],
         }
-        
+        server_debug("socket-join", {
+            "sid": sid,
+            "username": username,
+            "user_id": user_row["id"],
+            "device_id": device_id,
+            "device_mode": device_state["device_mode"],
+        })
         print(f"[JOIN] {username} joined room {room}")
 
         family_members = await loop.run_in_executor(None, build_family_presence_sync, family_id)
@@ -1059,6 +1101,21 @@ async def handle_offer(sid, data):
     if target_user_id:
         loop = asyncio.get_event_loop()
         devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], int(target_user_id))
+        server_debug("offer-target-user", {
+            "from_sid": sid,
+            "from_name": sender_name,
+            "target_user_id": int(target_user_id),
+            "is_video": is_video,
+            "devices": [
+                {
+                    "sid": device["sid"],
+                    "device_id": device.get("device_id"),
+                    "device_mode": device.get("device_mode"),
+                    "username": device.get("name"),
+                }
+                for device in devices
+            ],
+        })
         if not devices:
             await sio.emit('call-rejected', {'from': sid}, to=sid)
             return
@@ -1077,6 +1134,13 @@ async def handle_offer(sid, data):
             "controller_sid": controller_sid,
             "target_user_id": int(target_user_id),
         }
+        server_debug("offer-routing", {
+            "session_id": session_id,
+            "caller_sid": sid,
+            "controller_sid": controller_sid,
+            "viewer_sid": viewer_sid,
+            "is_video": is_video,
+        })
         await sio.emit('call-session-started', {
             'sessionId': session_id,
             'viewerSid': viewer_sid,
@@ -1112,6 +1176,13 @@ async def handle_offer(sid, data):
 async def handle_answer(sid, data):
     session_id = data.get('sessionId')
     answer_payload = normalize_session_description(data.get('answer'))
+    server_debug("answer-received", {
+        "sid": sid,
+        "session_id": session_id,
+        "to": data.get("to"),
+        "answer_type": data.get("answer", {}).get("type") if isinstance(data.get("answer"), dict) else None,
+        "answer_length": len(data.get("answer", {}).get("sdp", "")) if isinstance(data.get("answer"), dict) and data.get("answer", {}).get("sdp") else 0,
+    })
     if not answer_payload:
         print(f"[ANSWER] Invalid SDP payload from {sid}: {data.get('answer')}")
         return
@@ -1145,6 +1216,11 @@ async def handle_call_rejected(sid, data):
 @sio.on('end-call')
 async def handle_end_call(sid, data):
     session_id = data.get('sessionId')
+    server_debug("end-call", {
+        "sid": sid,
+        "session_id": session_id,
+        "to": data.get("to"),
+    })
     if session_id and session_id in call_sessions:
         session = end_call_session_sync(session_id)
         if not session:
@@ -1159,6 +1235,13 @@ async def handle_end_call(sid, data):
 async def handle_disconnect(sid):
     user_info = connected_users.pop(sid, None)
     if user_info:
+        server_debug("socket-disconnect", {
+            "sid": sid,
+            "username": user_info.get("name"),
+            "user_id": user_info.get("user_id"),
+            "device_id": user_info.get("device_id"),
+            "device_mode": user_info.get("device_mode"),
+        })
         session_id, session = get_call_session_by_sid_sync(sid)
         if session_id and session:
             end_call_session_sync(session_id)
