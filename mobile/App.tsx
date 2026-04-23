@@ -1024,26 +1024,7 @@ export default function App() {
     peerConnectionRef.current.onicecandidate = (event: any) => {
       if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
     };
-    peerConnectionRef.current.ontrack = (event: any) => {
-      const incomingStream = event.streams[0];
-      setRemoteStream(incomingStream);
-      const hasVideoTrack = Boolean(
-        incomingStream &&
-        typeof incomingStream.getVideoTracks === 'function' &&
-        incomingStream.getVideoTracks().length > 0
-      );
-      if (
-        deviceModeRef.current === 'controller' &&
-        viewerSocketIdRef.current &&
-        incomingStream &&
-        !viewerPeerConnectionRef.current &&
-        (!isVideoCallRef.current || hasVideoTrack)
-      ) {
-        startViewerMirrorConnection(viewerSocketIdRef.current, incomingStream).catch((error) => {
-          console.warn('Error starting controller viewer mirror connection:', error);
-        });
-      }
-    };
+    peerConnectionRef.current.ontrack = (event: any) => setRemoteStream(event.streams[0]);
   };
 
   const setupViewerPeerConnection = (targetId: string, stream: any) => {
@@ -1205,6 +1186,17 @@ export default function App() {
         answer: localAnswer,
         sessionId: data.sessionId,
       });
+      if (
+        data.isVideo &&
+        stream &&
+        data.callerViewerSid &&
+        deviceModeRef.current !== 'controller' &&
+        deviceModeRef.current !== 'viewer'
+      ) {
+        startViewerMirrorConnection(data.callerViewerSid, stream).catch((error) => {
+          console.warn('Error starting caller viewer mirror connection:', error);
+        });
+      }
     } catch (e) {
       console.error('Accept call error:', e);
       endCall(true);

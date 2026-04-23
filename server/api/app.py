@@ -1178,6 +1178,7 @@ async def handle_offer(sid, data):
             'offer': offer_payload,
             'isVideo': is_video,
             'sessionId': session_id,
+            'callerViewerSid': local_viewer_sid,
         }, to=controller_sid)
 
         if viewer_sid:
