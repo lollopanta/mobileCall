@@ -3,7 +3,9 @@ import {
   Platform,
   Alert,
   Switch,
+  StyleSheet,
   useColorScheme,
+  useWindowDimensions,
 } from 'react-native';
 import { View, Text, TextInput, Pressable, ScrollView, Image, SafeAreaView } from './src/tw';
 import { io, Socket } from 'socket.io-client';
@@ -71,6 +73,7 @@ const STORAGE_KEYS = {
   authToken: 'mobilecall_auth_token',
   userProfile: 'mobilecall_user_profile',
   deviceId: 'mobilecall_device_id',
+  autoAcceptVideoCalls: 'mobilecall_auto_accept_video_calls',
 };
 
 const storage = {
@@ -98,6 +101,9 @@ const storage = {
 
 export default function App() {
   const colorScheme = useColorScheme();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const isLandscape = windowWidth > windowHeight;
+  const remoteVideoObjectFit = isLandscape ? 'cover' : 'contain';
   const [view, setView] = useState<'auth' | 'main' | 'call' | 'upload' | 'profile' | 'family' | 'notifications' | 'family_settings'>('auth');
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   
@@ -112,6 +118,7 @@ export default function App() {
   const [devicePairing, setDevicePairing] = useState<any>(null);
   const [pairingCodeInput, setPairingCodeInput] = useState('');
   const [isVoipEligible, setIsVoipEligible] = useState(false);
+  const [autoAcceptVideoCalls, setAutoAcceptVideoCalls] = useState(false);
   
   // Family & Notifications State
   const [familyMembers, setFamilyMembers] = useState<any[]>([]);
@@ -149,7 +156,7 @@ export default function App() {
 
   const socketRef = useRef<Socket | null>(null);
   const peerConnectionRef = useRef<any>(null);
-  const viewerPeerConnectionRef = useRef<any>(null);
+  const viewerPeerConnectionsRef = useRef<Record<string, any>>({});
   const localStreamRef = useRef<any>(null);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
@@ -160,6 +167,8 @@ export default function App() {
   const deviceModeRef = useRef<DeviceMode>('standard');
   const isVideoCallRef = useRef(false);
   const viewerSocketIdRef = useRef<string | null>(null);
+  const localViewerSocketIdRef = useRef<string | null>(null);
+  const remoteViewerSocketIdRef = useRef<string | null>(null);
   const controllerSocketIdRef = useRef<string | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -222,6 +231,11 @@ export default function App() {
     setIsJoined(false);
     setUsers([]);
     setView('auth');
+  };
+
+  const handleAutoAcceptVideoCallsChange = async (enabled: boolean) => {
+    setAutoAcceptVideoCalls(enabled);
+    await storage.setItem(STORAGE_KEYS.autoAcceptVideoCalls, enabled ? 'true' : 'false');
   };
 
   const generateDeviceId = () => `device-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -356,11 +370,12 @@ export default function App() {
 
     const restoreSession = async () => {
       try {
-        const [savedServerUrl, savedToken, savedUserProfile, savedDeviceId] = await Promise.all([
+        const [savedServerUrl, savedToken, savedUserProfile, savedDeviceId, savedAutoAcceptVideoCalls] = await Promise.all([
           storage.getItem(STORAGE_KEYS.serverUrl),
           storage.getItem(STORAGE_KEYS.authToken),
           storage.getItem(STORAGE_KEYS.userProfile),
           storage.getItem(STORAGE_KEYS.deviceId),
+          storage.getItem(STORAGE_KEYS.autoAcceptVideoCalls),
         ]);
 
         if (!isMounted) return;
@@ -368,6 +383,7 @@ export default function App() {
         if (savedServerUrl) {
           setServerIP(savedServerUrl);
         }
+        setAutoAcceptVideoCalls(savedAutoAcceptVideoCalls === 'true');
 
         const resolvedDeviceId = savedDeviceId || generateDeviceId();
         setDeviceId(resolvedDeviceId);
@@ -765,7 +781,30 @@ export default function App() {
         });
         setIsIncomingCall(false);
         setCallStatus('ringing');
-        await acceptCall(data, true);
+        await acceptCall(data, 'video-only');
+        return;
+      }
+
+      if (deviceModeRef.current === 'controller') {
+        debugLog('socket:offer:auto_accept_controller', {
+          sessionId: data.sessionId,
+          deviceId: resolvedDeviceId,
+        });
+        setIsIncomingCall(false);
+        setCallStatus('ringing');
+        await acceptCall(data);
+        return;
+      }
+
+      if (data.autoAccept && data.isVideo) {
+        debugLog('socket:offer:auto_accept_video_call', {
+          sessionId: data.sessionId,
+          deviceId: resolvedDeviceId,
+          fromName: data.fromName,
+        });
+        setIsIncomingCall(false);
+        setCallStatus('ringing');
+        await acceptCall(data);
         return;
       }
 
@@ -815,6 +854,8 @@ export default function App() {
         currentMode: deviceModeRef.current,
       });
       activeSessionIdRef.current = data.sessionId || null;
+      localViewerSocketIdRef.current = data.localViewerSid || null;
+      remoteViewerSocketIdRef.current = data.viewerSid || null;
       viewerSocketIdRef.current = data.localViewerSid || data.viewerSid || null;
       controllerSocketIdRef.current = data.controllerSid || null;
       if (data.isVideo && data.viewerSid && data.controllerSid && data.viewerSid !== data.controllerSid && localStreamRef.current) {
@@ -831,10 +872,13 @@ export default function App() {
         answerType: data.answer?.type,
         currentMode: deviceModeRef.current,
         viewerSocketId: viewerSocketIdRef.current,
+        localViewerSocketId: localViewerSocketIdRef.current,
+        remoteViewerSocketId: remoteViewerSocketIdRef.current,
         controllerSocketId: controllerSocketIdRef.current,
       });
-      if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
-        await viewerPeerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+      const viewerPeerConnection = viewerPeerConnectionsRef.current[data.from];
+      if (viewerPeerConnection) {
+        await viewerPeerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
         return;
       }
       if (peerConnectionRef.current) {
@@ -849,11 +893,12 @@ export default function App() {
       debugLog('socket:ice-candidate', {
         from: data.from,
         currentMode: deviceModeRef.current,
-        isViewerCandidate: data.from === viewerSocketIdRef.current,
+        isViewerCandidate: Boolean(viewerPeerConnectionsRef.current[data.from]),
       });
-      if (data.from === viewerSocketIdRef.current && viewerPeerConnectionRef.current) {
+      const viewerPeerConnection = viewerPeerConnectionsRef.current[data.from];
+      if (viewerPeerConnection) {
         try {
-          await viewerPeerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+          await viewerPeerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
         } catch (e) {}
         return;
       }
@@ -978,7 +1023,7 @@ export default function App() {
     }
   };
 
-  const startLocalStream = async (video: boolean) => {
+  const startLocalStream = async (video: boolean, showPermissionAlert = true) => {
     console.log(`Starting local stream: video=${video}`);
     
     if (Platform.OS === 'web' && !window.isSecureContext) {
@@ -1007,33 +1052,48 @@ export default function App() {
       return stream;
     } catch (e: any) {
       console.error('getUserMedia error:', e);
-      Alert.alert('Permission Error', `Cannot access camera or microphone: ${e.message}`);
+      if (showPermissionAlert) {
+        Alert.alert('Permission Error', `Cannot access camera or microphone: ${e.message}`);
+      }
       return null;
     }
   };
 
-  const setupPeerConnection = (targetId: string, stream?: any, receiveOnly = false) => {
+  const setupPeerConnection = (targetId: string, stream?: any, receiveOnly: boolean | 'video-only' = false) => {
     if (!RTCPeerConnection) return;
     peerConnectionRef.current = new RTCPeerConnection(iceServers);
     if (stream) {
       stream.getTracks().forEach((track: any) => peerConnectionRef.current.addTrack(track, stream));
     } else if (receiveOnly && peerConnectionRef.current.addTransceiver) {
-      peerConnectionRef.current.addTransceiver('audio', { direction: 'recvonly' });
+      if (receiveOnly !== 'video-only') {
+        peerConnectionRef.current.addTransceiver('audio', { direction: 'recvonly' });
+      }
       peerConnectionRef.current.addTransceiver('video', { direction: 'recvonly' });
     }
     peerConnectionRef.current.onicecandidate = (event: any) => {
       if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
     };
-    peerConnectionRef.current.ontrack = (event: any) => setRemoteStream(event.streams[0]);
+    peerConnectionRef.current.ontrack = (event: any) => {
+      const incomingStream = event.streams[0];
+      setRemoteStream(incomingStream);
+      const localViewerSid = localViewerSocketIdRef.current;
+      if (isVideoCallRef.current && localViewerSid && incomingStream && !viewerPeerConnectionsRef.current[localViewerSid]) {
+        startViewerMirrorConnection(localViewerSid, incomingStream).catch((error) => {
+          console.warn('Error starting local viewer mirror connection:', error);
+        });
+      }
+    };
   };
 
   const setupViewerPeerConnection = (targetId: string, stream: any) => {
-    if (!RTCPeerConnection) return;
-    viewerPeerConnectionRef.current = new RTCPeerConnection(iceServers);
-    stream.getTracks().forEach((track: any) => viewerPeerConnectionRef.current.addTrack(track, stream));
-    viewerPeerConnectionRef.current.onicecandidate = (event: any) => {
+    if (!RTCPeerConnection) return null;
+    const peerConnection = new RTCPeerConnection(iceServers);
+    getVideoTracks(stream).forEach((track: any) => peerConnection.addTrack(track, stream));
+    peerConnection.onicecandidate = (event: any) => {
       if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
     };
+    viewerPeerConnectionsRef.current[targetId] = peerConnection;
+    return peerConnection;
   };
 
   const serializeSessionDescription = (description: any) => ({
@@ -1041,18 +1101,28 @@ export default function App() {
     sdp: description?.sdp || null,
   });
 
+  const getVideoTracks = (stream: any) => {
+    if (!stream) return [];
+    if (typeof stream.getVideoTracks === 'function') return stream.getVideoTracks();
+    if (typeof stream.getTracks === 'function') {
+      return stream.getTracks().filter((track: any) => track.kind === 'video');
+    }
+    return [];
+  };
+
   const startViewerMirrorConnection = async (viewerSid: string, mirrorStream?: any) => {
     const sourceStream = mirrorStream || localStreamRef.current;
-    if (!RTCPeerConnection || !sourceStream) return;
+    if (!RTCPeerConnection || !sourceStream || getVideoTracks(sourceStream).length === 0) return;
     viewerSocketIdRef.current = viewerSid;
-    if (viewerPeerConnectionRef.current) {
-      viewerPeerConnectionRef.current.close();
-      viewerPeerConnectionRef.current = null;
+    if (viewerPeerConnectionsRef.current[viewerSid]) {
+      viewerPeerConnectionsRef.current[viewerSid].close();
+      delete viewerPeerConnectionsRef.current[viewerSid];
     }
-    setupViewerPeerConnection(viewerSid, sourceStream);
-    const offer = await viewerPeerConnectionRef.current.createOffer();
-    await viewerPeerConnectionRef.current.setLocalDescription(offer);
-    const localOffer = serializeSessionDescription(viewerPeerConnectionRef.current.localDescription);
+    const viewerPeerConnection = setupViewerPeerConnection(viewerSid, sourceStream);
+    if (!viewerPeerConnection) return;
+    const offer = await viewerPeerConnection.createOffer();
+    await viewerPeerConnection.setLocalDescription(offer);
+    const localOffer = serializeSessionDescription(viewerPeerConnection.localDescription);
     socketRef.current?.emit('offer', {
       to: viewerSid,
       offer: localOffer,
@@ -1086,10 +1156,20 @@ export default function App() {
       setView('call');
       playRingtone();
 
-      const stream = await startLocalStream(video);
+      let stream = await startLocalStream(video, !video);
+      let receiveOnly = false;
       if (!stream) {
-        stopRingtone();
-        return;
+        if (video) {
+          debugLog('initiateCall:local_stream_failed_falling_back_to_receive_only', {
+            deviceId,
+            currentMode: deviceModeRef.current,
+            targetId,
+          });
+          receiveOnly = true;
+        } else {
+          stopRingtone();
+          return;
+        }
       }
       
       if (!RTCPeerConnection) {
@@ -1098,20 +1178,27 @@ export default function App() {
         return;
       }
 
-      setupPeerConnection(targetId, stream);
+      setupPeerConnection(targetId, stream, receiveOnly);
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
       const localOffer = serializeSessionDescription(peerConnectionRef.current.localDescription);
+      const shouldAutoAcceptVideoCall =
+        video &&
+        autoAcceptVideoCalls &&
+        userProfile?.role === 'caregiver' &&
+        userProfile?.username === 'lollopanta';
       debugLog('initiateCall:emit_offer', {
         targetId,
         type: localOffer.type,
         sdpLength: localOffer.sdp ? localOffer.sdp.length : 0,
         currentMode: deviceModeRef.current,
+        autoAccept: shouldAutoAcceptVideoCall,
       });
       socketRef.current?.emit('offer', {
         toUserId: targetId,
         offer: localOffer,
         isVideo: video,
+        autoAccept: shouldAutoAcceptVideoCall,
       });
     } catch (e: any) {
       console.error('Call Error:', e);
@@ -1121,7 +1208,7 @@ export default function App() {
     }
   };
 
-  const acceptCall = async (incomingData = offerDataRef.current, receiveOnly = false) => {
+  const acceptCall = async (incomingData = offerDataRef.current, receiveOnly: boolean | 'video-only' = false) => {
     const data = incomingData;
     debugLog('acceptCall:start', {
       hasData: Boolean(data),
@@ -1143,12 +1230,22 @@ export default function App() {
     stopRingtone();
 
     let stream = null;
-    if (!receiveOnly) {
-      stream = await startLocalStream(data.isVideo);
+    let shouldReceiveOnly: boolean | 'video-only' = receiveOnly;
+    if (!shouldReceiveOnly) {
+      stream = await startLocalStream(data.isVideo, !data.isVideo);
       if (!stream) {
-        socketRef.current?.emit('call-rejected', { to: data.from, sessionId: data.sessionId });
-        endCall(false);
-        return;
+        if (data.isVideo) {
+          debugLog('acceptCall:local_stream_failed_falling_back_to_receive_only', {
+            deviceId,
+            deviceModeRef: deviceModeRef.current,
+            sessionId: data.sessionId,
+          });
+          shouldReceiveOnly = true;
+        } else {
+          socketRef.current?.emit('call-rejected', { to: data.from, sessionId: data.sessionId });
+          endCall(false);
+          return;
+        }
       }
     }
 
@@ -1158,7 +1255,7 @@ export default function App() {
       return;
     }
 
-    setupPeerConnection(data.from, stream, receiveOnly);
+    setupPeerConnection(data.from, stream, shouldReceiveOnly);
     try {
       if (!data.offer?.type || !data.offer?.sdp) {
         debugLog('acceptCall:missing_offer_payload', {
@@ -1178,7 +1275,7 @@ export default function App() {
         sessionId: data.sessionId,
         type: localAnswer.type,
         sdpLength: localAnswer.sdp ? localAnswer.sdp.length : 0,
-        receiveOnly,
+        receiveOnly: shouldReceiveOnly,
         currentMode: deviceModeRef.current,
       });
       socketRef.current?.emit('answer', {
@@ -1190,7 +1287,6 @@ export default function App() {
         data.isVideo &&
         stream &&
         data.callerViewerSid &&
-        deviceModeRef.current !== 'controller' &&
         deviceModeRef.current !== 'viewer'
       ) {
         startViewerMirrorConnection(data.callerViewerSid, stream).catch((error) => {
@@ -1235,10 +1331,8 @@ export default function App() {
       peerConnectionRef.current.close(); 
       peerConnectionRef.current = null; 
     }
-    if (viewerPeerConnectionRef.current) {
-      viewerPeerConnectionRef.current.close();
-      viewerPeerConnectionRef.current = null;
-    }
+    Object.values(viewerPeerConnectionsRef.current).forEach((connection: any) => connection.close());
+    viewerPeerConnectionsRef.current = {};
     if (localStreamRef.current) { 
       localStreamRef.current.getTracks().forEach((t: any) => t.stop()); 
       localStreamRef.current = null; 
@@ -1248,6 +1342,8 @@ export default function App() {
     offerDataRef.current = null;
     activeSessionIdRef.current = null;
     viewerSocketIdRef.current = null;
+    localViewerSocketIdRef.current = null;
+    remoteViewerSocketIdRef.current = null;
     controllerSocketIdRef.current = null;
     isVideoCallRef.current = false;
     setLocalStream(null);
@@ -1258,6 +1354,7 @@ export default function App() {
   };
 
   const isSplitGrandparent = userProfile?.role === 'grandparent';
+  const canUseAutoAcceptVideoCalls = userProfile?.role === 'caregiver' && userProfile?.username === 'lollopanta';
 
   // --- RENDERING ---
 
@@ -1350,6 +1447,44 @@ export default function App() {
   if (view === 'call') {
     const isControllerDevice = deviceMode === 'controller';
     const isViewerDevice = deviceMode === 'viewer';
+    const isConnectedRemoteCall = callStatus === 'connected' && !isControllerDevice;
+
+    if (isConnectedRemoteCall) {
+      return (
+        <SafeAreaView className="flex-1 bg-black">
+          <StatusBar hidden />
+          <View style={[styles.fullscreenVideoStage, { width: windowWidth, height: windowHeight }]}>
+            {Platform.OS === 'web' ? (
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                style={{ width: '100%', height: '100%', backgroundColor: '#000', objectFit: 'cover' } as any}
+              />
+            ) : (
+              remoteStream && (
+                <RTCView
+                  streamURL={remoteStream.toURL()}
+                  style={StyleSheet.absoluteFillObject}
+                  objectFit="cover"
+                />
+              )
+            )}
+            {!isViewerDevice && (
+              <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
+                <MaterialIcons name="call-end" size={32} color="#fff" />
+              </Pressable>
+            )}
+            {isViewerDevice && (
+              <View className="absolute bottom-8 self-center bg-black/50 px-4 py-2 rounded-full">
+                <Text className="text-white text-xs">Viewer device</Text>
+              </View>
+            )}
+          </View>
+        </SafeAreaView>
+      );
+    }
+
     return (
       <SafeAreaView className="flex-1 bg-bg-main">
         <StatusBar style="auto" />
@@ -1373,20 +1508,27 @@ export default function App() {
               )}
             </View>
           ) : isControllerDevice ? (
-            <View className="flex-1 w-full mt-8">
-              <Text className="text-text-dim mb-4 text-center">
+            <View className="flex-1 w-full mt-8 items-center justify-center relative">
+              {Platform.OS === 'web' && remoteStream ? (
+                <video ref={remoteVideoRef} autoPlay playsInline style={styles.hiddenRemoteAudio as any} />
+              ) : null}
+              <View className="items-center px-5">
+                <MaterialIcons name="settings-voice" size={42} color="#9333EA" />
+                <Text className="text-text-main text-xl font-bold mt-3 text-center">Call audio active</Text>
+                <Text className="text-text-dim mt-2 text-center">
                 {callStatus === 'connected'
-                  ? 'This paired device is sending camera and microphone. The primary device is showing the remote webcam.'
+                  ? 'This device is using the microphone, camera, and speaker.'
                   : 'Preparing camera, microphone, and paired viewer screen.'}
-              </Text>
-              <View className="flex-1 rounded-3xl overflow-hidden border border-glass-border bg-black">
+                </Text>
+              </View>
+              <View className="absolute top-0 right-0 w-36 h-36 rounded-2xl overflow-hidden border border-glass-border bg-black">
                 {Platform.OS === 'web' ? (
-                  <video ref={localVideoRef} autoPlay muted playsInline style={{ flex: 1, backgroundColor: '#000', objectFit: 'cover' } as any} />
+                  <video ref={localVideoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', backgroundColor: '#000', objectFit: 'cover' } as any} />
                 ) : (
-                  localStream && <RTCView streamURL={localStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit="cover" mirror />
+                  localStream && <RTCView streamURL={localStream.toURL()} style={StyleSheet.absoluteFillObject} objectFit="cover" mirror />
                 )}
               </View>
-              <View className="items-center mt-6">
+              <View className="absolute bottom-4 self-center">
                 <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
                 </Pressable>
@@ -1403,9 +1545,9 @@ export default function App() {
           ) : (
             <View className="flex-1 w-full relative">
               {Platform.OS === 'web' ? (
-                <video ref={remoteVideoRef} autoPlay playsInline style={{ flex: 1, backgroundColor: '#000', objectFit: 'contain' } as any} />
+                <video ref={remoteVideoRef} autoPlay playsInline style={{ flex: 1, width: '100%', height: '100%', backgroundColor: '#000', objectFit: remoteVideoObjectFit } as any} />
               ) : (
-                remoteStream && <RTCView streamURL={remoteStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit="contain" />
+                remoteStream && <RTCView streamURL={remoteStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit={remoteVideoObjectFit} />
               )}
               {!isViewerDevice && (
                 <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
@@ -1540,6 +1682,20 @@ export default function App() {
                     <Text className="text-xs text-text-dim mt-2">Roles are chosen when creating or accepting a family invitation.</Text>
                   </View>
                 </View>
+                {canUseAutoAcceptVideoCalls && (
+                  <View className="mb-5 p-4 rounded-xl border border-glass-border bg-bg-main flex-row items-center justify-between gap-4">
+                    <View className="flex-1">
+                      <Text className="text-text-main font-bold">Auto-accept video calls</Text>
+                      <Text className="text-xs text-text-dim mt-2">When enabled, receivers do not need to accept your video calls.</Text>
+                    </View>
+                    <Switch
+                      value={autoAcceptVideoCalls}
+                      onValueChange={handleAutoAcceptVideoCallsChange}
+                      trackColor={{ false: '#475569', true: '#9333EA' }}
+                      thumbColor="#fff"
+                    />
+                  </View>
+                )}
                 <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
                    const baseUrl = getBaseUrl();
                    try {
@@ -1838,3 +1994,17 @@ export default function App() {
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  fullscreenVideoStage: {
+    flex: 1,
+    backgroundColor: '#000',
+    overflow: 'hidden',
+  },
+  hiddenRemoteAudio: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+});
