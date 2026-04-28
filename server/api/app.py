@@ -1091,7 +1091,8 @@ async def handle_offer(sid, data):
     target_user_id = data.get('toUserId')
     offer_payload = normalize_session_description(data.get('offer'))
     is_video = bool(data.get('isVideo'))
-    auto_accept = bool(data.get('autoAccept')) and is_video and user_info and user_info.get("name") == "lollopanta" and user_info.get("role") == "caregiver"
+    auto_accept_requested = data.get('autoAccept') is True
+    auto_accept = auto_accept_requested and is_video and user_info and user_info.get("name") == "lollopanta" and user_info.get("role") == "caregiver"
 
     if not user_info:
         return
@@ -1109,6 +1110,7 @@ async def handle_offer(sid, data):
             "from_name": sender_name,
             "target_user_id": target_user_id_int,
             "is_video": is_video,
+            "auto_accept_requested": auto_accept_requested,
             "auto_accept": auto_accept,
             "devices": [
                 {
@@ -1206,6 +1208,7 @@ async def handle_offer(sid, data):
         'offer': offer_payload,
         'isVideo': is_video,
         'autoAccept': auto_accept,
+        'mirrorOnly': data.get('mirrorOnly') is True,
         'sessionId': data.get('sessionId'),
     }, to=target_to)
 

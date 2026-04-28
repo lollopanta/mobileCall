@@ -100,6 +100,16 @@ const storage = {
   },
 };
 
+const normalizeServerUrl = (value: string) => {
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return 'http://localhost:3000';
+  if (trimmedValue.startsWith('http://') || trimmedValue.startsWith('https://')) {
+    return trimmedValue.endsWith('/') ? trimmedValue.slice(0, -1) : trimmedValue;
+  }
+  const sanitizedIP = trimmedValue.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  return `http://${sanitizedIP}:3000`;
+};
+
 export default function App() {
   const colorScheme = useColorScheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -173,6 +183,7 @@ export default function App() {
   const remoteViewerSocketIdRef = useRef<string | null>(null);
   const controllerSocketIdRef = useRef<string | null>(null);
   const autoAcceptTimerRef = useRef<TimerRef | null>(null);
+  const serverBaseUrlRef = useRef('http://localhost:3000');
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
@@ -352,11 +363,8 @@ export default function App() {
   };
 
   const playAutoAcceptAlarm = async () => {
-    const alarmUrl = `${getBaseUrl()}/static/audio/Alarm.mp3?ts=${Date.now()}`;
-    const didPlayAlarm = await playSound({ uri: alarmUrl }, 'auto-accept alarm');
-    if (!didPlayAlarm) {
-      await playRingtone();
-    }
+    const alarmUrl = `${serverBaseUrlRef.current}/static/audio/Alarm.mp3?ts=${Date.now()}`;
+    await playSound({ uri: alarmUrl }, 'auto-accept alarm');
   };
 
   const stopRingtone = async () => {
@@ -422,6 +430,7 @@ export default function App() {
         if (!isMounted) return;
 
         if (savedServerUrl) {
+          serverBaseUrlRef.current = normalizeServerUrl(savedServerUrl);
           setServerIP(savedServerUrl);
         }
         setAutoAcceptVideoCalls(savedAutoAcceptVideoCalls === 'true');
@@ -472,17 +481,10 @@ export default function App() {
   }, [serverIP]);
 
   const getBaseUrl = () => {
-    if (!serverIP) return 'http://localhost:3000'; // Fallback
-    
-    // Check if the user already specified a protocol
-    const trimmedIP = serverIP.trim();
-    if (trimmedIP.startsWith('http://') || trimmedIP.startsWith('https://')) {
-      return trimmedIP.endsWith('/') ? trimmedIP.slice(0, -1) : trimmedIP;
-    }
-    
-    // Fallback to http with port 3000
-    let sanitizedIP = trimmedIP.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
-    return `http://${sanitizedIP}:3000`;
+    if (!serverIP) return serverBaseUrlRef.current;
+    const normalizedUrl = normalizeServerUrl(serverIP);
+    serverBaseUrlRef.current = normalizedUrl;
+    return normalizedUrl;
   };
 
   const autoDiscoverServer = async () => {
@@ -732,7 +734,8 @@ export default function App() {
   };
 
   const handleJoin = (tokenToUse: string | null = authToken, serverUrlOverride?: string, deviceIdOverride?: string) => {
-    const socketUrl = serverUrlOverride || getBaseUrl();
+    const socketUrl = normalizeServerUrl(serverUrlOverride || getBaseUrl());
+    serverBaseUrlRef.current = socketUrl;
     const resolvedDeviceId = deviceIdOverride || deviceId;
     debugLog('handleJoin:init', {
       socketUrl,
@@ -815,7 +818,18 @@ export default function App() {
       setCallerName(data.fromName);
       setView('call');
 
-      if (data.autoAccept && data.isVideo) {
+      if (data.mirrorOnly && deviceModeRef.current === 'viewer') {
+        debugLog('socket:offer:auto_accept_viewer_mirror', {
+          sessionId: data.sessionId,
+          deviceId: resolvedDeviceId,
+        });
+        setIsIncomingCall(false);
+        setCallStatus('ringing');
+        await acceptCall(data, 'video-only');
+        return;
+      }
+
+      if (data.autoAccept === true && data.isVideo === true) {
         debugLog('socket:offer:auto_accept_video_call', {
           sessionId: data.sessionId,
           deviceId: resolvedDeviceId,
@@ -1150,6 +1164,7 @@ export default function App() {
       offer: localOffer,
       isVideo: true,
       sessionId: activeSessionIdRef.current,
+      mirrorOnly: true,
     });
   };
 
@@ -1176,7 +1191,16 @@ export default function App() {
       isVideoCallRef.current = video;
       setIsVideoEnabled(video);
       setView('call');
-      playRingtone();
+      const shouldAutoAcceptVideoCall =
+        video &&
+        autoAcceptVideoCalls &&
+        userProfile?.role === 'caregiver' &&
+        userProfile?.username === 'lollopanta';
+      if (shouldAutoAcceptVideoCall) {
+        playAutoAcceptAlarm();
+      } else {
+        playRingtone();
+      }
 
       let stream = await startLocalStream(video, !video);
       let receiveOnly = false;
@@ -1204,11 +1228,6 @@ export default function App() {
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
       const localOffer = serializeSessionDescription(peerConnectionRef.current.localDescription);
-      const shouldAutoAcceptVideoCall =
-        video &&
-        autoAcceptVideoCalls &&
-        userProfile?.role === 'caregiver' &&
-        userProfile?.username === 'lollopanta';
       debugLog('initiateCall:emit_offer', {
         targetId,
         type: localOffer.type,
