@@ -825,28 +825,6 @@ export default function App() {
         return;
       }
 
-      if (deviceModeRef.current === 'viewer') {
-        debugLog('socket:offer:auto_accept_viewer', {
-          sessionId: data.sessionId,
-          deviceId: resolvedDeviceId,
-        });
-        setIsIncomingCall(false);
-        setCallStatus('ringing');
-        await acceptCall(data, 'video-only');
-        return;
-      }
-
-      if (deviceModeRef.current === 'controller') {
-        debugLog('socket:offer:auto_accept_controller', {
-          sessionId: data.sessionId,
-          deviceId: resolvedDeviceId,
-        });
-        setIsIncomingCall(false);
-        setCallStatus('ringing');
-        await acceptCall(data);
-        return;
-      }
-
       setIsIncomingCall(true);
       setCallStatus('ringing');
       playRingtone();
@@ -1548,7 +1526,7 @@ export default function App() {
           )}
           {isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
-              <Pressable onPress={() => acceptCall()} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
+              <Pressable onPress={() => acceptCall(offerDataRef.current, isViewerDevice ? 'video-only' : false)} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
                 <MaterialIcons name="call" size={32} color="#fff" />
               </Pressable>
               {!isViewerDevice && (
