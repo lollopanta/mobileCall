@@ -1091,6 +1091,7 @@ async def handle_offer(sid, data):
     target_user_id = data.get('toUserId')
     offer_payload = normalize_session_description(data.get('offer'))
     is_video = bool(data.get('isVideo'))
+    auto_accept = bool(data.get('autoAccept')) and is_video and user_info and user_info.get("name") == "lollopanta" and user_info.get("role") == "caregiver"
 
     if not user_info:
         return
@@ -1108,6 +1109,7 @@ async def handle_offer(sid, data):
             "from_name": sender_name,
             "target_user_id": target_user_id_int,
             "is_video": is_video,
+            "auto_accept": auto_accept,
             "devices": [
                 {
                     "sid": device["sid"],
@@ -1177,6 +1179,7 @@ async def handle_offer(sid, data):
             'fromName': sender_name,
             'offer': offer_payload,
             'isVideo': is_video,
+            'autoAccept': auto_accept,
             'sessionId': session_id,
             'callerViewerSid': local_viewer_sid,
         }, to=controller_sid)
@@ -1202,6 +1205,7 @@ async def handle_offer(sid, data):
         'fromName': sender_name,
         'offer': offer_payload,
         'isVideo': is_video,
+        'autoAccept': auto_accept,
         'sessionId': data.get('sessionId'),
     }, to=target_to)
 
@@ -1227,13 +1231,19 @@ async def handle_answer(sid, data):
                 'phase': 'connected',
                 'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
             }, to=session["controller_sid"])
+        if session.get("viewer_sid"):
+            await sio.emit('call-controller-state', {
+                'sessionId': session_id,
+                'phase': 'connected',
+                'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
+            }, to=session["viewer_sid"])
         if session.get("local_viewer_sid"):
             await sio.emit('call-controller-state', {
                 'sessionId': session_id,
                 'phase': 'connected',
                 'callerName': connected_users.get(session["caller_sid"], {}).get("name", "Caregiver"),
             }, to=session["local_viewer_sid"])
-    await sio.emit('answer', {'from': sid, 'answer': answer_payload}, to=data.get('to'))
+    await sio.emit('answer', {'from': sid, 'answer': answer_payload, 'sessionId': session_id}, to=data.get('to'))
 
 @sio.on('ice-candidate')
 async def handle_ice_candidate(sid, data):
