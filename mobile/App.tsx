@@ -60,6 +60,7 @@ type User = {
   is_voip_eligible?: boolean;
 };
 type TimerRef = ReturnType<typeof setTimeout>;
+const AUTO_ACCEPT_RING_MS = 3000;
 type FamilySettingsState = {
   google_photos_album_url?: string;
   idle_timeout: number;
@@ -140,6 +141,7 @@ export default function App() {
   const [callStatus, setCallStatus] = useState<'idle' | 'calling' | 'ringing' | 'connected'>('idle');
   const [callerName, setCallerName] = useState('');
   const [isIncomingCall, setIsIncomingCall] = useState(false);
+  const [isAutoAcceptingCall, setIsAutoAcceptingCall] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [callDuration, setCallDuration] = useState(0);
@@ -170,6 +172,7 @@ export default function App() {
   const localViewerSocketIdRef = useRef<string | null>(null);
   const remoteViewerSocketIdRef = useRef<string | null>(null);
   const controllerSocketIdRef = useRef<string | null>(null);
+  const autoAcceptTimerRef = useRef<TimerRef | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
 
@@ -357,8 +360,35 @@ export default function App() {
     }
   };
 
+  const clearPendingAutoAccept = () => {
+    if (autoAcceptTimerRef.current) {
+      clearTimeout(autoAcceptTimerRef.current);
+      autoAcceptTimerRef.current = null;
+    }
+  };
+
+  const scheduleAutoAcceptCall = (incomingData: any, receiveOnly: boolean | 'video-only' = false) => {
+    clearPendingAutoAccept();
+    setIsIncomingCall(false);
+    setIsAutoAcceptingCall(true);
+    setCallStatus('ringing');
+    playRingtone();
+    autoAcceptTimerRef.current = setTimeout(() => {
+      autoAcceptTimerRef.current = null;
+      if (incomingData?.sessionId && activeSessionIdRef.current !== incomingData.sessionId) {
+        setIsAutoAcceptingCall(false);
+        stopRingtone();
+        return;
+      }
+      acceptCall(incomingData, receiveOnly).catch((error) => {
+        console.warn('Error auto-accepting call:', error);
+      });
+    }, AUTO_ACCEPT_RING_MS);
+  };
+
   useEffect(() => {
     return () => {
+      clearPendingAutoAccept();
       if (soundRef.current) {
         soundRef.current.unloadAsync();
       }
@@ -774,6 +804,16 @@ export default function App() {
       setCallerName(data.fromName);
       setView('call');
 
+      if (data.autoAccept && data.isVideo) {
+        debugLog('socket:offer:auto_accept_video_call', {
+          sessionId: data.sessionId,
+          deviceId: resolvedDeviceId,
+          fromName: data.fromName,
+        });
+        scheduleAutoAcceptCall(data, deviceModeRef.current === 'viewer' ? 'video-only' : false);
+        return;
+      }
+
       if (deviceModeRef.current === 'viewer') {
         debugLog('socket:offer:auto_accept_viewer', {
           sessionId: data.sessionId,
@@ -789,18 +829,6 @@ export default function App() {
         debugLog('socket:offer:auto_accept_controller', {
           sessionId: data.sessionId,
           deviceId: resolvedDeviceId,
-        });
-        setIsIncomingCall(false);
-        setCallStatus('ringing');
-        await acceptCall(data);
-        return;
-      }
-
-      if (data.autoAccept && data.isVideo) {
-        debugLog('socket:offer:auto_accept_video_call', {
-          sessionId: data.sessionId,
-          deviceId: resolvedDeviceId,
-          fromName: data.fromName,
         });
         setIsIncomingCall(false);
         setCallStatus('ringing');
@@ -840,6 +868,7 @@ export default function App() {
       setCallerName(data.callerName || 'Caregiver');
       setView('call');
       setIsIncomingCall(false);
+      setIsAutoAcceptingCall(false);
       if (data.phase === 'ringing') {
         setCallStatus('ringing');
       } else if (data.phase === 'connected') {
@@ -911,11 +940,15 @@ export default function App() {
 
     socketRef.current.on('call-rejected', () => {
       Alert.alert('Rejected', 'Call was declined');
+      clearPendingAutoAccept();
+      setIsAutoAcceptingCall(false);
       stopRingtone();
       endCall(false);
     });
 
     socketRef.current.on('end-call', () => {
+      clearPendingAutoAccept();
+      setIsAutoAcceptingCall(false);
       stopRingtone();
       endCall(false);
     });
@@ -1224,7 +1257,9 @@ export default function App() {
     });
     if (!data) return;
 
+    clearPendingAutoAccept();
     setIsIncomingCall(false);
+    setIsAutoAcceptingCall(false);
     setCallStatus('connected');
     remoteSocketIdRef.current = data.from;
     stopRingtone();
@@ -1300,6 +1335,8 @@ export default function App() {
   };
 
   const declineCall = () => {
+    clearPendingAutoAccept();
+    setIsAutoAcceptingCall(false);
     if (remoteSocketIdRef.current) {
       socketRef.current?.emit('call-rejected', { to: remoteSocketIdRef.current, sessionId: activeSessionIdRef.current });
     } else if (offerDataRef.current) {
@@ -1317,6 +1354,8 @@ export default function App() {
       controllerSocketId: controllerSocketIdRef.current,
       currentMode: deviceModeRef.current,
     });
+    clearPendingAutoAccept();
+    setIsAutoAcceptingCall(false);
     if (emitEvent) {
       if (activeSessionIdRef.current) {
         socketRef.current?.emit('end-call', { sessionId: activeSessionIdRef.current });
@@ -1490,7 +1529,7 @@ export default function App() {
         <StatusBar style="auto" />
         <View className="flex-grow justify-center items-center p-5">
           <Text className="text-text-main text-2xl">
-            {isIncomingCall ? 'Incoming Call from' : isControllerDevice ? 'Call Controller' : 'Calling...'}
+            {isIncomingCall || isAutoAcceptingCall ? 'Incoming Call from' : isControllerDevice ? 'Call Controller' : 'Calling...'}
           </Text>
           <Text className="text-text-main text-3xl font-bold">{callerName}</Text>
           {(callStatus === 'connected' || isControllerDevice) && (
