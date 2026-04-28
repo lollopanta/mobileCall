@@ -325,7 +325,7 @@ export default function App() {
     }
   };
 
-  const playRingtone = async () => {
+  const playSound = async (source: any, label: string) => {
     try {
       if (soundRef.current) {
         await soundRef.current.unloadAsync();
@@ -337,14 +337,25 @@ export default function App() {
         shouldDuckAndroid: true,
       });
 
-      const { sound } = await Audio.Sound.createAsync(
-        require('./assets/audio/Ringtone.mp3'),
-        { shouldPlay: true, isLooping: true }
-      );
+      const { sound } = await Audio.Sound.createAsync(source, { shouldPlay: true, isLooping: true });
       soundRef.current = sound;
       await sound.playAsync();
+      return true;
     } catch (error) {
-      console.warn('Error playing ringtone:', error);
+      console.warn(`Error playing ${label}:`, error);
+      return false;
+    }
+  };
+
+  const playRingtone = async () => {
+    await playSound(require('./assets/audio/Ringtone.mp3'), 'ringtone');
+  };
+
+  const playAutoAcceptAlarm = async () => {
+    const alarmUrl = `${getBaseUrl()}/static/audio/Alarm.mp3?ts=${Date.now()}`;
+    const didPlayAlarm = await playSound({ uri: alarmUrl }, 'auto-accept alarm');
+    if (!didPlayAlarm) {
+      await playRingtone();
     }
   };
 
@@ -372,7 +383,7 @@ export default function App() {
     setIsIncomingCall(false);
     setIsAutoAcceptingCall(true);
     setCallStatus('ringing');
-    playRingtone();
+    playAutoAcceptAlarm();
     autoAcceptTimerRef.current = setTimeout(() => {
       autoAcceptTimerRef.current = null;
       if (incomingData?.sessionId && activeSessionIdRef.current !== incomingData.sessionId) {
