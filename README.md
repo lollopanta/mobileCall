@@ -40,7 +40,7 @@ python api/app.py
 ```
 > [!NOTE]
 > The server runs on port `3000` by default. Ensure your firewall allows incoming traffic on this port for LAN testing.
-> Edit `server/.env` before first run to set your local secrets.
+> Edit `server/.env` before first run. `SECRET_KEY` must be a random secret of at least 32 bytes (generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`). The server refuses missing or example secrets. Set `DEFAULT_GRANDPARENT_PASSWORD` before database initialization if you want to use the initial `grandparent` account; otherwise its password is random and cannot be recovered. Existing account passwords are never changed by initialization.
 
 ### 2. Mobile & Web Application (`pnpm`)
 Navigate to the `mobile` directory:
@@ -79,3 +79,13 @@ pnpm exec expo run:android # or ios
 - **Family Isolation**: Users cannot "discover" or call anyone outside of their authorized family group.
 - **Token Security**: All API requests and signaling registrations require a valid JWT bearer token.
 - **Local SQLite**: User data is stored locally in `server/userDatabase.db` by default.
+
+## Automated checks
+
+```bash
+server/.venv/bin/python -m pip install -r server/requirements-test.txt
+server/.venv/bin/python -m unittest discover -s server/tests -v
+cd mobile && pnpm exec tsc --noEmit
+```
+
+Incoming video auto-answer is disabled by default and can be enabled by the recipient in Profile. It applies to family caregiver calls after an audible warning; the caller cannot override the recipient's setting. Existing outgoing-call preferences are not reused as consent.

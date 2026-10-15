@@ -36,6 +36,7 @@ class FallSensorService:
                 print(f"Attempt {i+1}/{retries}: Could not initialize MPU6050: {e}")
                 if self.bus:
                     self.bus.close()
+                    self.bus = None
                 time.sleep(1)
 
         self.threshold_impact = 2.5 # G-force threshold for impact
@@ -51,7 +52,7 @@ class FallSensorService:
             # Combine high and low for 16-bit value
             value = (high << 8) | low
             # Get signed value
-            if value > 32768:
+            if value >= 32768:
                 value = value - 65536
             return value
         except OSError as e:
@@ -138,7 +139,7 @@ class FallSensorService:
             return caregivers
 
         while True:
-            selection_mode, user_info = _get_target_user_info()
+            selection_mode, user_info = await asyncio.to_thread(_get_target_user_info)
             if selection_mode == "NONE":
                 self._set_status(
                     "waiting-for-primary",
@@ -165,7 +166,9 @@ class FallSensorService:
 
             if not self.enabled:
                 self._set_status("sensor-reinit", "Sensor not enabled, attempting to re-initialize...")
-                self.__init__(self.bus_number, self.address)
+                if self.bus:
+                    await asyncio.to_thread(self.bus.close)
+                await asyncio.to_thread(self.__init__, self.bus_number, self.address)
                 if not self.enabled:
                     await asyncio.sleep(10)
                     continue

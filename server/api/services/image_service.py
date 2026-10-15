@@ -53,8 +53,11 @@ class ImageProcessingService:
         x2 = min(width, x + w + pad_x)
         y2 = min(height, y + h + pad_y)
         
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError("Face coordinates are outside the image")
         face_img = img[y1:y2, x1:x2]
-        cv2.imwrite(output_path, face_img)
+        if not cv2.imwrite(output_path, face_img):
+            raise OSError("Could not save cropped image")
         return output_path
 
     def remove_background(self, frame):

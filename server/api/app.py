@@ -6,9 +6,10 @@ import bcrypt
 import jwt
 import datetime
 import secrets
+from urllib.parse import urlsplit
 from functools import wraps
 from typing import Optional
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import uvicorn
 import aiofiles
@@ -32,7 +33,9 @@ from api.services.image_service import ImageProcessingService
 from api.services.fall_sensor import FallSensorService
 
 # --- Configuration ---
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me")
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+if len(SECRET_KEY.encode()) < 32 or SECRET_KEY in {"dev-only-secret-change-me", "replace-this-with-a-long-random-secret"}:
+    raise RuntimeError("Set SECRET_KEY in server/.env to a random secret of at least 32 bytes")
 UPLOAD_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), 'static', 'uploads'))
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -49,12 +52,17 @@ sio = socketio.AsyncServer(
 # --- Lifespan Handler ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize services
     grandparent_username = os.getenv("GRANDPARENT_USERNAME")
-    asyncio.create_task(fall_sensor.start_monitoring(sio, grandparent_username))
-    yield
-    # Shutdown: Clean up resources if needed
-    pass
+    sensor = await asyncio.to_thread(FallSensorService)
+    task = asyncio.create_task(sensor.start_monitoring(sio, grandparent_username))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        if sensor.bus:
+            await asyncio.to_thread(sensor.bus.close)
 
 # --- FastAPI App Setup ---
 app = FastAPI(lifespan=lifespan)
@@ -72,13 +80,53 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 
 # --- Services ---
 image_processor = ImageProcessingService()
-fall_sensor = FallSensorService()
 # Note: we keep these as dicts in memory as before, though for production 
 # shared state between processes would need Redis/DB.
 connected_users = {} # {sid: {"name": username, "family_id": family_id, "role": role, "user_id": id}}
 call_sessions = {} # {session_id: {"caller_sid": sid, "viewer_sid": sid, "controller_sid": sid|None, "local_viewer_sid": sid|None, "target_user_id": int}}
 
 # --- Helpers ---
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 20_000_000
+
+async def read_validated_image(image):
+    from io import BytesIO
+    from PIL import Image, UnidentifiedImageError
+    content = await image.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds 10 MiB")
+    def validate():
+        try:
+            with Image.open(BytesIO(content)) as decoded:
+                if decoded.format not in {"JPEG", "PNG", "WEBP"} or decoded.width * decoded.height > MAX_IMAGE_PIXELS:
+                    raise ValueError("Unsupported image format or dimensions")
+                decoded.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(status_code=400, detail="Invalid or oversized image")
+    await asyncio.to_thread(validate)
+    return content
+
+async def read_json_object(request):
+    try:
+        data = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    return data
+
+
+def validate_album_url(url):
+    try:
+        parsed = urlsplit(url)
+        valid = (parsed.scheme == "https" and parsed.hostname in {"photos.google.com", "photos.app.goo.gl"}
+                 and parsed.port in (None, 443) and not parsed.username and not parsed.password)
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="Use a public Google Photos HTTPS album URL")
+    return url
 
 async def get_current_user(request: Request):
     token = request.headers.get('Authorization')
@@ -313,9 +361,14 @@ async def register_view(request: Request):
 
 @app.post("/register")
 async def register(request: Request):
-    data = await request.json()
+    data = await read_json_object(request)
     uName = data.get('username')
     passW = data.get('password')
+
+    if (not isinstance(uName, str) or not uName.strip()
+            or not isinstance(passW, str) or not passW
+            or len(passW.encode("utf-8")) > 72):
+        return JSONResponse({"status": "unsuccessful", "message": "Valid username and password (max 72 bytes) required"}, status_code=400)
 
     if not uName or not passW:
         return JSONResponse({"status": "unsuccessful", "message": "Username and password required"}, status_code=400)
@@ -342,9 +395,14 @@ async def login_view(request: Request):
 
 @app.post("/login")
 async def login(request: Request):
-    data = await request.json()
+    data = await read_json_object(request)
     uName = data.get('username')
     passW = data.get('password')
+
+    if (not isinstance(uName, str) or not uName.strip()
+            or not isinstance(passW, str) or not passW
+            or len(passW.encode("utf-8")) > 72):
+        return JSONResponse({"status": "unsuccessful", "message": "Valid username and password (max 72 bytes) required"}, status_code=400)
 
     loop = asyncio.get_event_loop()
     user_row = await loop.run_in_executor(None, get_user, uName)
@@ -411,9 +469,13 @@ async def get_family_settings(current_user = Depends(get_current_user)):
 
 @app.post("/api/family/settings")
 async def update_family_settings(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     album_url = data.get('google_photos_album_url')
     idle_timeout = data.get('idle_timeout', 5)
+    if album_url:
+        validate_album_url(album_url)
+    if type(idle_timeout) is not int or idle_timeout <= 0:
+        raise HTTPException(status_code=400, detail="Idle timeout must be a positive integer")
     
     loop = asyncio.get_event_loop()
     is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
@@ -451,6 +513,8 @@ async def get_family_photos(current_user = Depends(get_current_user)):
     if not album_url:
         return {"status": "successful", "photos": []}
 
+    validate_album_url(album_url)
+
     # Scrape Google Photos Album
     # Simple regex for public albums: looks for base URLs of images
     try:
@@ -459,8 +523,13 @@ async def get_family_photos(current_user = Depends(get_current_user)):
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req) as response:
-                    html = response.read().decode('utf-8')
+                class AlbumRedirectHandler(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):
+                        validate_album_url(newurl)
+                        return super().redirect_request(req, fp, code, msg, headers, newurl)
+                opener = urllib.request.build_opener(AlbumRedirectHandler())
+                with opener.open(req, timeout=10) as response:
+                    html = response.read(5 * 1024 * 1024).decode('utf-8')
                     # Find image URLs: they usually look like https://lh3.googleusercontent.com/...
                     # We want the ones that are likely to be photos in the album
                     # This regex matches the common pattern for Google Photos image URLs in the page source
@@ -486,7 +555,7 @@ async def get_family_photos(current_user = Depends(get_current_user)):
 
 @app.post("/api/family/create")
 async def create_family(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     family_name = data.get('name')
     # Limit roles to caregiver or grandparent
     admin_role = data.get('role', 'grandparent')
@@ -501,6 +570,10 @@ async def create_family(request: Request, current_user = Depends(get_current_use
         conn = get_connection()
         cursor = conn.cursor()
         try:
+            cursor.execute('BEGIN IMMEDIATE')
+            cursor.execute('SELECT family_id FROM users WHERE id = ?', (current_user['id'],))
+            if cursor.fetchone()['family_id']:
+                raise HTTPException(status_code=409, detail="Already in a family")
             cursor.execute('INSERT INTO families (name, admin_id) VALUES (?, ?)', (family_name, current_user['id']))
             family_id = cursor.lastrowid
             cursor.execute('UPDATE users SET family_id = ?, role = ? WHERE id = ?', (family_id, admin_role, current_user['id']))
@@ -516,6 +589,8 @@ async def create_family(request: Request, current_user = Depends(get_current_use
         if admin_role == 'grandparent':
             await loop.run_in_executor(None, set_device_config_value, "active_primary_grandparent_id", str(current_user['id']))
         return {"status": "successful", "family_id": family_id, "message": f"Family '{family_name}' created"}
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse({"status": "unsuccessful", "message": str(e)}, status_code=500)
 
@@ -552,7 +627,7 @@ async def get_family_members(current_user = Depends(get_current_user)):
 
 @app.post("/api/family/invite")
 async def invite_member(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     target_username = data.get('username')
     
     loop = asyncio.get_event_loop()
@@ -633,7 +708,7 @@ async def set_primary_grandparent(request: Request, current_user = Depends(get_c
     if not is_admin:
         return JSONResponse({"status": "unsuccessful", "message": "Only the family admin can choose the primary grandparent"}, status_code=403)
 
-    data = await request.json()
+    data = await read_json_object(request)
     member_id = data.get('member_id')
     if not member_id:
         return JSONResponse({"status": "unsuccessful", "message": "Member id required"}, status_code=400)
@@ -692,7 +767,7 @@ async def start_pairing(request: Request, current_user = Depends(get_current_use
         return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can start device pairing"}, status_code=400)
 
     loop = asyncio.get_event_loop()
-    data = await request.json()
+    data = await read_json_object(request)
     device_id = data.get("device_id")
     server_debug("start-pairing-request", {
         "user_id": current_user["id"],
@@ -728,7 +803,7 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
         return JSONResponse({"status": "unsuccessful", "message": "Only family grandparents can join device pairing"}, status_code=400)
 
     loop = asyncio.get_event_loop()
-    data = await request.json()
+    data = await read_json_object(request)
     device_id = data.get("device_id")
     pairing_code = (data.get("pairing_code") or "").strip().upper()
     server_debug("join-pairing-request", {
@@ -749,7 +824,9 @@ async def join_pairing(request: Request, current_user = Depends(get_current_user
     if pairing["viewer_device_id"] and pairing["viewer_device_id"] != device_id:
         return JSONResponse({"status": "unsuccessful", "message": "A viewer device is already paired"}, status_code=400)
 
-    await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
+    completed = await loop.run_in_executor(None, complete_device_pairing, pairing["id"], device_id)
+    if not completed:
+        raise HTTPException(status_code=409, detail="Pairing is expired or already completed")
     await loop.run_in_executor(None, refresh_connected_device_modes_sync, current_user["family_id"], current_user["id"])
     server_debug("join-pairing-completed", {
         "user_id": current_user["id"],
@@ -806,7 +883,7 @@ async def get_fall_logs(current_user = Depends(get_current_user)):
 
 @app.post("/api/notifications/respond")
 async def respond_notification(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     invite_id = data.get('invite_id')
     response = data.get('response')
     selected_role = data.get('role')
@@ -821,11 +898,16 @@ async def respond_notification(request: Request, current_user = Depends(get_curr
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('SELECT family_id FROM invitations WHERE id = ? AND receiver_id = ?', (invite_id, current_user['id']))
+            cursor.execute('BEGIN IMMEDIATE')
+            cursor.execute('SELECT family_id FROM invitations WHERE id = ? AND receiver_id = ? AND status = \'pending\'', (invite_id, current_user['id']))
             invite = cursor.fetchone()
             if not invite:
                 return {"success": False}
             family_id = invite[0]
+            if response == 'accepted':
+                cursor.execute('SELECT family_id FROM users WHERE id = ?', (current_user['id'],))
+                if cursor.fetchone()['family_id']:
+                    return {"success": False}
             cursor.execute('UPDATE invitations SET status = ? WHERE id = ?', (response, invite_id))
             auto_assigned_primary = False
             if response == 'accepted':
@@ -865,7 +947,7 @@ async def get_profile(current_user = Depends(get_current_user)):
     loop = asyncio.get_event_loop()
     is_admin = await loop.run_in_executor(None, is_family_admin_sync, current_user)
     family_info = await loop.run_in_executor(None, get_family_admin_info_sync, current_user.get('family_id'))
-    user_data = dict(current_user)
+    user_data = {key: value for key, value in current_user.items() if key != "password"}
     user_data['is_family_admin'] = is_admin
     user_data['is_primary_grandparent'] = family_info['primary_grandparent_id'] == current_user['id']
     user_data['family_primary_grandparent_id'] = family_info['primary_grandparent_id']
@@ -874,7 +956,7 @@ async def get_profile(current_user = Depends(get_current_user)):
 
 @app.post("/api/profile/update")
 async def update_profile(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     role = data.get('role')
     age = data.get('age')
     
@@ -899,12 +981,15 @@ async def update_profile(request: Request, current_user = Depends(get_current_us
 @app.post("/api/profile/upload-direct")
 async def upload_profile_photo_direct(image: UploadFile = File(...), current_user = Depends(get_current_user)):
     username = current_user['username']
-    extension = image.filename.split('.')[-1] if '.' in image.filename else 'jpg'
-    filename = f"{username}_profile.{extension}"
+    extension = (image.filename or "").rsplit('.', 1)[-1].lower()
+    if extension not in {"jpg", "jpeg", "png", "webp"}:
+        raise HTTPException(status_code=400, detail="Unsupported image format")
+    filename = f"user_{current_user['id']}_profile.{extension}"
     output_path = os.path.join(UPLOAD_FOLDER, filename)
     
+    content = await read_validated_image(image)
     async with aiofiles.open(output_path, "wb") as buffer:
-        await buffer.write(await image.read())
+        await buffer.write(content)
 
     loop = asyncio.get_event_loop()
     try:
@@ -927,12 +1012,14 @@ async def upload_image(
     if username and username != effective_username:
         return JSONResponse({"status": "unsuccessful", "message": "Username mismatch"}, status_code=403)
 
-    filename = secure_filename(f"{effective_username}_group_{image.filename}")
+    if (image.filename or "").rsplit('.', 1)[-1].lower() not in {"jpg", "jpeg", "png", "webp"}:
+        raise HTTPException(status_code=400, detail="Unsupported image format")
+    filename = f"user_{current_user['id']}_group_{secrets.token_hex(16)}_{secure_filename(image.filename or 'image.jpg')}"
     temp_path = os.path.join(UPLOAD_FOLDER, filename)
     
-    import aiofiles
+    content = await read_validated_image(image)
     async with aiofiles.open(temp_path, "wb") as buffer:
-        await buffer.write(await image.read())
+        await buffer.write(content)
 
     loop = asyncio.get_event_loop()
     try:
@@ -948,7 +1035,7 @@ async def upload_image(
 
 @app.post("/finalize-crop")
 async def finalize_crop(request: Request, current_user = Depends(get_current_user)):
-    data = await request.json()
+    data = await read_json_object(request)
     image_id = data.get('image_id')
     face = data.get('face')
 
@@ -956,8 +1043,14 @@ async def finalize_crop(request: Request, current_user = Depends(get_current_use
         return JSONResponse({"status": "unsuccessful", "message": "Missing data"}, status_code=400)
 
     username = current_user['username']
+    if (not isinstance(image_id, str) or os.path.basename(image_id) != image_id
+            or not image_id.startswith(f"user_{current_user['id']}_group_")):
+        raise HTTPException(status_code=403, detail="Image does not belong to this user")
+    if (not isinstance(face, dict) or any(type(face.get(k)) is not int for k in ('x', 'y', 'w', 'h'))
+            or face['x'] < 0 or face['y'] < 0 or face['w'] <= 0 or face['h'] <= 0):
+        raise HTTPException(status_code=400, detail="Invalid face coordinates")
     input_path = os.path.join(UPLOAD_FOLDER, image_id)
-    output_filename = f"{username}_profile.jpg"
+    output_filename = f"user_{current_user['id']}_profile.jpg"
     output_path = os.path.join(UPLOAD_FOLDER, output_filename)
 
     loop = asyncio.get_event_loop()
@@ -976,9 +1069,13 @@ async def finalize_crop(request: Request, current_user = Depends(get_current_use
 
 @app.get("/user/{username}", response_class=HTMLResponse)
 async def user_profile_view(request: Request, username: str):
-    logged_user = request.cookies.get("logged_in_user")
+    try:
+        current_user = await get_current_user(request)
+    except HTTPException:
+        return RedirectResponse(url="/login", status_code=303)
+    logged_user = current_user["username"]
     if logged_user != username:
-        return RedirectResponse(url="/login")
+        raise HTTPException(status_code=403, detail="Access denied")
     
     loop = asyncio.get_event_loop()
     user_data = await loop.run_in_executor(None, get_user, username)
@@ -1050,6 +1147,9 @@ async def handle_join(sid, data):
 
         family_id = user_row['family_id']
         room = f"family_{family_id}"
+        previous = connected_users.get(sid)
+        if previous and previous['family_id'] != family_id:
+            await sio.leave_room(sid, f"family_{previous['family_id']}")
         await sio.enter_room(sid, room)
         device_state = await loop.run_in_executor(None, get_device_mode_sync, user_row, device_id)
         connected_users[sid] = {
@@ -1083,8 +1183,28 @@ async def handle_request_user_list(sid, data):
         family_members = await loop.run_in_executor(None, build_family_presence_sync, family_id)
         await sio.emit('user-list', family_members, to=sid)
 
+def authorized_signal(sid, data, require_target=True):
+    if not isinstance(data, dict):
+        return False
+    sender = connected_users.get(sid)
+    if not sender or not sender.get("family_id"):
+        return False
+    session_id = data.get("sessionId")
+    if session_id:
+        session = call_sessions.get(session_id)
+        if not session or sid not in [session.get(k) for k in ("caller_sid", "controller_sid", "viewer_sid", "local_viewer_sid")]:
+            return False
+    if require_target:
+        if session_id and data.get("to") not in [session.get(k) for k in ("caller_sid", "controller_sid", "viewer_sid", "local_viewer_sid")]:
+            return False
+        target = connected_users.get(data.get("to"))
+        return bool(target and target["family_id"] == sender["family_id"])
+    return True
+
 @sio.on('offer')
 async def handle_offer(sid, data):
+    if not authorized_signal(sid, data, require_target=not bool(isinstance(data, dict) and data.get('toUserId'))):
+        return
     user_info = connected_users.get(sid)
     sender_name = user_info['name'] if user_info else "Unknown"
     target_to = data.get('to')
@@ -1092,7 +1212,7 @@ async def handle_offer(sid, data):
     offer_payload = normalize_session_description(data.get('offer'))
     is_video = bool(data.get('isVideo'))
     auto_accept_requested = data.get('autoAccept') is True
-    auto_accept = auto_accept_requested and is_video and user_info and user_info.get("name") == "lollopanta" and user_info.get("role") == "caregiver"
+    auto_accept = bool(auto_accept_requested and is_video and user_info and user_info.get("role") == "caregiver")
 
     if not user_info:
         return
@@ -1102,7 +1222,10 @@ async def handle_offer(sid, data):
 
     if target_user_id:
         loop = asyncio.get_event_loop()
-        target_user_id_int = int(target_user_id)
+        try:
+            target_user_id_int = int(target_user_id)
+        except (ValueError, TypeError, OverflowError):
+            return
         devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], target_user_id_int)
         caller_devices = await loop.run_in_executor(None, resolve_connected_devices_for_user_sync, user_info["family_id"], user_info["user_id"])
         server_debug("offer-target-user", {
@@ -1214,6 +1337,8 @@ async def handle_offer(sid, data):
 
 @sio.on('answer')
 async def handle_answer(sid, data):
+    if not authorized_signal(sid, data, require_target=True):
+        return
     session_id = data.get('sessionId')
     answer_payload = normalize_session_description(data.get('answer'))
     server_debug("answer-received", {
@@ -1250,10 +1375,16 @@ async def handle_answer(sid, data):
 
 @sio.on('ice-candidate')
 async def handle_ice_candidate(sid, data):
+    if not authorized_signal(sid, data, require_target=True):
+        return
     await sio.emit('ice-candidate', {'from': sid, 'candidate': data.get('candidate')}, to=data.get('to'))
 
 @sio.on('call-rejected')
 async def handle_call_rejected(sid, data):
+    if not authorized_signal(sid, data, require_target=False):
+        return
+    if not data.get("sessionId") and not authorized_signal(sid, data):
+        return
     session_id = data.get('sessionId')
     if session_id and session_id in call_sessions:
         session = end_call_session_sync(session_id)
@@ -1267,6 +1398,10 @@ async def handle_call_rejected(sid, data):
 
 @sio.on('end-call')
 async def handle_end_call(sid, data):
+    if not authorized_signal(sid, data, require_target=False):
+        return
+    if not data.get("sessionId") and not authorized_signal(sid, data):
+        return
     session_id = data.get('sessionId')
     server_debug("end-call", {
         "sid": sid,

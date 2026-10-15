@@ -74,7 +74,7 @@ const STORAGE_KEYS = {
   authToken: 'mobilecall_auth_token',
   userProfile: 'mobilecall_user_profile',
   deviceId: 'mobilecall_device_id',
-  autoAcceptVideoCalls: 'mobilecall_auto_accept_video_calls',
+  autoAcceptVideoCalls: 'mobilecall_incoming_video_consent_v1',
 };
 
 const storage = {
@@ -169,6 +169,8 @@ export default function App() {
   const socketRef = useRef<Socket | null>(null);
   const peerConnectionRef = useRef<any>(null);
   const viewerPeerConnectionsRef = useRef<Record<string, any>>({});
+  const pendingIceCandidatesRef = useRef<Record<string, any[]>>({});
+  const autoAcceptVideoCallsRef = useRef(false);
   const localStreamRef = useRef<any>(null);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
@@ -238,6 +240,7 @@ export default function App() {
     } catch (error) {
       console.warn('Error clearing saved session:', error);
     }
+    endCall(true);
     socketRef.current?.disconnect();
     setAuthToken(null);
     setUserProfile(null);
@@ -248,6 +251,7 @@ export default function App() {
   };
 
   const handleAutoAcceptVideoCallsChange = async (enabled: boolean) => {
+    autoAcceptVideoCallsRef.current = enabled;
     setAutoAcceptVideoCalls(enabled);
     await storage.setItem(STORAGE_KEYS.autoAcceptVideoCalls, enabled ? 'true' : 'false');
   };
@@ -408,6 +412,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearPendingAutoAccept();
+      socketRef.current?.disconnect();
+      peerConnectionRef.current?.close();
+      Object.values(viewerPeerConnectionsRef.current).forEach((connection: any) => connection.close());
+      localStreamRef.current?.getTracks().forEach((track: any) => track.stop());
       if (soundRef.current) {
         soundRef.current.unloadAsync();
       }
@@ -433,6 +441,7 @@ export default function App() {
           serverBaseUrlRef.current = normalizeServerUrl(savedServerUrl);
           setServerIP(savedServerUrl);
         }
+        autoAcceptVideoCallsRef.current = savedAutoAcceptVideoCalls === 'true';
         setAutoAcceptVideoCalls(savedAutoAcceptVideoCalls === 'true');
 
         const resolvedDeviceId = savedDeviceId || generateDeviceId();
@@ -829,7 +838,7 @@ export default function App() {
         return;
       }
 
-      if (data.autoAccept === true && data.isVideo === true) {
+      if (data.autoAccept === true && data.isVideo === true && autoAcceptVideoCallsRef.current) {
         debugLog('socket:offer:auto_accept_video_call', {
           sessionId: data.sessionId,
           deviceId: resolvedDeviceId,
@@ -911,10 +920,12 @@ export default function App() {
       const viewerPeerConnection = viewerPeerConnectionsRef.current[data.from];
       if (viewerPeerConnection) {
         await viewerPeerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await flushIceCandidates(data.from, viewerPeerConnection);
         return;
       }
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await flushIceCandidates(data.from, peerConnectionRef.current);
         remoteSocketIdRef.current = data.from;
         setCallStatus('connected');
         stopRingtone();
@@ -922,22 +933,21 @@ export default function App() {
     });
 
     socketRef.current.on('ice-candidate', async (data) => {
-      debugLog('socket:ice-candidate', {
-        from: data.from,
-        currentMode: deviceModeRef.current,
-        isViewerCandidate: Boolean(viewerPeerConnectionsRef.current[data.from]),
-      });
-      const viewerPeerConnection = viewerPeerConnectionsRef.current[data.from];
-      if (viewerPeerConnection) {
-        try {
-          await viewerPeerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {}
+      if (!data?.from || !data.candidate) return;
+      const connection = viewerPeerConnectionsRef.current[data.from]
+        || (remoteSocketIdRef.current === data.from ? peerConnectionRef.current : null);
+      if (!connection?.remoteDescription) {
+        const queue = pendingIceCandidatesRef.current[data.from] || [];
+        if (queue.length < 128 && Object.keys(pendingIceCandidatesRef.current).length < 16) {
+          queue.push(data.candidate);
+          pendingIceCandidatesRef.current[data.from] = queue;
+        }
         return;
       }
-      if (peerConnectionRef.current) {
-        try {
-          await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (e) {}
+      try {
+        await connection.addIceCandidate(new RTCIceCandidate(data.candidate));
+      } catch (error) {
+        console.warn('Could not add ICE candidate:', error);
       }
     });
 
@@ -1121,6 +1131,18 @@ export default function App() {
     };
   };
 
+  const flushIceCandidates = async (senderSid: string, connection: any) => {
+    const candidates = pendingIceCandidatesRef.current[senderSid] || [];
+    delete pendingIceCandidatesRef.current[senderSid];
+    for (const candidate of candidates) {
+      try {
+        await connection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.warn('Could not add queued ICE candidate:', error);
+      }
+    }
+  };
+
   const setupViewerPeerConnection = (targetId: string, stream: any) => {
     if (!RTCPeerConnection) return null;
     const peerConnection = new RTCPeerConnection(iceServers);
@@ -1193,9 +1215,7 @@ export default function App() {
       setView('call');
       const shouldAutoAcceptVideoCall =
         video &&
-        autoAcceptVideoCalls &&
-        userProfile?.role === 'caregiver' &&
-        userProfile?.username === 'lollopanta';
+        userProfile?.role === 'caregiver';
       if (shouldAutoAcceptVideoCall) {
         playAutoAcceptAlarm();
       } else {
@@ -1310,6 +1330,7 @@ export default function App() {
         throw new Error('Missing SDP offer payload');
       }
       await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+      await flushIceCandidates(data.from, peerConnectionRef.current);
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
       const localAnswer = serializeSessionDescription(peerConnectionRef.current.localDescription);
@@ -1380,6 +1401,7 @@ export default function App() {
     }
     Object.values(viewerPeerConnectionsRef.current).forEach((connection: any) => connection.close());
     viewerPeerConnectionsRef.current = {};
+    pendingIceCandidatesRef.current = {};
     if (localStreamRef.current) { 
       localStreamRef.current.getTracks().forEach((t: any) => t.stop()); 
       localStreamRef.current = null; 
@@ -1401,7 +1423,7 @@ export default function App() {
   };
 
   const isSplitGrandparent = userProfile?.role === 'grandparent';
-  const canUseAutoAcceptVideoCalls = userProfile?.role === 'caregiver' && userProfile?.username === 'lollopanta';
+  const canUseAutoAcceptVideoCalls = Boolean(userProfile);
 
   // --- RENDERING ---
 
@@ -1733,7 +1755,7 @@ export default function App() {
                   <View className="mb-5 p-4 rounded-xl border border-glass-border bg-bg-main flex-row items-center justify-between gap-4">
                     <View className="flex-1">
                       <Text className="text-text-main font-bold">Auto-accept video calls</Text>
-                      <Text className="text-xs text-text-dim mt-2">When enabled, receivers do not need to accept your video calls.</Text>
+                      <Text className="text-xs text-text-dim mt-2">Allow incoming video calls from family caregivers to be answered automatically after an audible warning.</Text>
                     </View>
                     <Switch
                       value={autoAcceptVideoCalls}

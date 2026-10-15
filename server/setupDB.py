@@ -1,6 +1,8 @@
 import sqlite3
 import bcrypt
 import os
+import datetime
+import secrets
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
@@ -124,7 +126,7 @@ def init_db():
     if not cursor.fetchone():
         print("Creating default grandparent user...")
         salt = bcrypt.gensalt()
-        default_password = os.getenv("DEFAULT_GRANDPARENT_PASSWORD", "change-me-now")
+        default_password = os.getenv("DEFAULT_GRANDPARENT_PASSWORD") or secrets.token_urlsafe(32)
         hashed_password = bcrypt.hashpw(default_password.encode('utf-8'), salt)
         cursor.execute('''
             INSERT INTO users (username, password, role, family_id, is_voip_eligible) 
@@ -268,22 +270,27 @@ def complete_device_pairing(pairing_id, viewer_device_id):
     conn = get_connection()
     cursor = conn.cursor()
     ensure_device_pairings_table(cursor)
-    cursor.execute('SELECT controller_device_id FROM device_pairings WHERE id = ?', (pairing_id,))
-    existing_pairing = cursor.fetchone()
-    if not existing_pairing:
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        cursor.execute('SELECT * FROM device_pairings WHERE id = ?', (pairing_id,))
+        pairing = cursor.fetchone()
+        if not pairing or pairing['status'] != 'pending' or pairing['controller_device_id'] == viewer_device_id:
+            return False
+        try:
+            expires = datetime.datetime.fromisoformat(pairing['expires_at'])
+            if expires <= datetime.datetime.now(datetime.UTC):
+                return False
+        except (ValueError, TypeError):
+            return False
+        cursor.execute(
+            "UPDATE device_pairings SET controller_device_id = ?, viewer_device_id = ?, status = 'active' WHERE id = ?",
+            (viewer_device_id, pairing['controller_device_id'], pairing_id),
+        )
+        conn.commit()
+        return True
+    finally:
         conn.close()
-        return
-    original_device_id = existing_pairing['controller_device_id']
-    cursor.execute(
-        '''
-        UPDATE device_pairings
-        SET controller_device_id = ?, viewer_device_id = ?, status = 'active'
-        WHERE id = ?
-        ''',
-        (viewer_device_id, original_device_id, pairing_id),
-    )
-    conn.commit()
-    conn.close()
+
 
 def get_device_role_for_device(family_id, grandparent_user_id, device_id):
     conn = get_connection()
