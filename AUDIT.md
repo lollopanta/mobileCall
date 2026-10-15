@@ -36,11 +36,11 @@ Corrette anche le seguenti condizioni:
 - Upload limitati a 10 MiB e 20 milioni di pixel con verifica effettiva JPEG/PNG/WebP; validazione del ritaglio e degli errori di scrittura.
 - Inizializzazione e riavvio del sensore fuori dall'event loop; cancellazione del task e chiusura del bus in shutdown.
 
-Verifica ampliata: 13 test backend superati, comprese richieste HTTP reali tramite TestClient, caricamenti e shutdown. TypeScript superato dopo le modifiche funzionali; l'ultima modifica successiva cambia soltanto la chiave della preferenza di consenso.
+Verifica ampliata: 13 test backend superati, comprese richieste HTTP reali tramite TestClient, caricamenti e shutdown. TypeScript superato anche dopo il ripristino delle dipendenze locali.
 
 ## Aspetti ancora da affrontare
 
-- Gli scanner hanno rilevato vulnerabilità nelle dipendenze Python e JavaScript. Gli aggiornamenti non sono stati completati entro il tempo disponibile: manifest e lockfile mobile mantengono le versioni originali. Servono aggiornamenti e una verifica completa delle build native; il progetto non va considerato completamente risanato.
+- Gli scanner hanno rilevato vulnerabilità nelle dipendenze Python e JavaScript. Gli aggiornamenti non sono stati completati entro il tempo disponibile: il manifest mobile nel repository resta invariato. Servono aggiornamenti e una verifica completa delle build native; il progetto non va considerato completamente risanato.
 - È necessario cambiare manualmente eventuali password predefinite già presenti e configurare una chiave JWT robusta prima di avviare il server. Nessuna credenziale o dato esistente è stato modificato.
 - I test automatizzati non validano audio/video su dispositivi reali, i permessi nativi o il rilevamento fisico delle cadute.
 
