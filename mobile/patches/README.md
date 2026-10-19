@@ -8,7 +8,9 @@ lockfile. No advisory is ignored or excluded from the raw scanner output.
 | --- | --- | --- |
 | node-forge 1.4.0 | [GHSA-86w9-cpqp-85rv](https://github.com/advisories/GHSA-86w9-cpqp-85rv) | Check the nested AlgorithmIdentifier element count, including optional NULL; reject non-empty NULL values. |
 | braces 3.0.3 | [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | Limit parser stack nesting and recursive AST walkers to 128 levels, including caller-supplied ASTs. |
-| sprintf-js 1.0.3 | [GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c) | Reject width or precision above 100,000 before evaluating the argument or allocating output. |
+SDK 58 removes the babel-jest / js-yaml 3 / argparse 1 dependency chain and
+`sprintf-js` from the lockfile. Its patch is retained for reference but is no
+longer configured; formatter regression tests were removed with the dependency.
 
 The RSA element-count check follows the proposed upstream fix in
 [digitalbazaar/forge#1152](https://github.com/digitalbazaar/forge/pull/1152).
@@ -19,7 +21,7 @@ The tests sign deliberately malformed encodings to exercise the verifier; they
 do not claim to test every possible cryptographic attack.
 
 Only the entrypoints used by the installed Node/Expo toolchain are patched:
-`node-forge/lib/rsa.js`, the braces parser/walkers, and `sprintf-js/src/sprintf.js`.
+`node-forge/lib/rsa.js` and the braces parser/walkers.
 Unused prebuilt browser distributions shipped inside those packages are not
 modified. These packages are consumed by the development/build toolchain here.
 
@@ -36,7 +38,7 @@ pnpm audit
 The tests resolve each library through its actual consuming dependency chain,
 not an unrelated copy left in node_modules. They check malicious input and normal
 usage. The same tests have passed in a clean installation built from the lock.
-Raw `pnpm audit` continues to report the three upstream versions and returns a
+Raw `pnpm audit` continues to report the upstream versions and returns a
 nonzero exit status; version-based scanning cannot verify these local changes.
 A passing regression suite is evidence for the specific guarded behavior, not a
 blanket guarantee of security.

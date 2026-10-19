@@ -11,9 +11,17 @@ import {
   ScrollView as RNScrollView,
   TouchableHighlight as RNTouchableHighlight,
   TextInput as RNTextInput,
-  SafeAreaView as RNSafeAreaView,
   StyleSheet,
 } from "react-native";
+
+import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
+
+// Limit CSS mapping inference to style props; React Native 0.88 prop types
+// otherwise exceed TypeScript's recursive type expansion limit.
+type StyleableComponent = React.ComponentType<{
+  style?: object;
+  contentContainerStyle?: object;
+}>;
 
 // CSS Variable hook
 export const useCSSVariable =
@@ -27,7 +35,7 @@ export type ViewProps = React.ComponentProps<typeof RNView> & {
 };
 
 export const View = (props: ViewProps) => {
-  return useCssElement(RNView, props, { className: "style" });
+  return useCssElement<StyleableComponent>(RNView, props, { className: "style" });
 };
 View.displayName = "CSS(View)";
 
@@ -35,7 +43,7 @@ View.displayName = "CSS(View)";
 export const Text = (
   props: React.ComponentProps<typeof RNText> & { className?: string }
 ) => {
-  return useCssElement(RNText, props, { className: "style" });
+  return useCssElement<StyleableComponent>(RNText, props, { className: "style" });
 };
 Text.displayName = "CSS(Text)";
 
@@ -46,7 +54,7 @@ export const ScrollView = (
     contentContainerClassName?: string;
   }
 ) => {
-  return useCssElement(RNScrollView, props, {
+  return useCssElement<StyleableComponent>(RNScrollView, props, {
     className: "style",
     contentContainerClassName: "contentContainerStyle",
   });
@@ -57,7 +65,7 @@ ScrollView.displayName = "CSS(ScrollView)";
 export const Pressable = (
   props: React.ComponentProps<typeof RNPressable> & { className?: string }
 ) => {
-  return useCssElement(RNPressable, props, { className: "style" });
+  return useCssElement<StyleableComponent>(RNPressable, props, { className: "style" });
 };
 Pressable.displayName = "CSS(Pressable)";
 
@@ -65,7 +73,7 @@ Pressable.displayName = "CSS(Pressable)";
 export const TextInput = (
   props: React.ComponentProps<typeof RNTextInput> & { className?: string }
 ) => {
-  return useCssElement(RNTextInput, props, { className: "style" });
+  return useCssElement<StyleableComponent>(RNTextInput, props, { className: "style" });
 };
 TextInput.displayName = "CSS(TextInput)";
 
@@ -73,7 +81,7 @@ TextInput.displayName = "CSS(TextInput)";
 export const SafeAreaView = (
   props: React.ComponentProps<typeof RNSafeAreaView> & { className?: string }
 ) => {
-  return useCssElement(RNSafeAreaView, props, { className: "style" });
+  return useCssElement<StyleableComponent>(RNSafeAreaView, props, { className: "style" });
 };
 SafeAreaView.displayName = "CSS(SafeAreaView)";
 

@@ -1,4 +1,4 @@
-const { AndroidConfig, withAndroidManifest } = require('@expo/config-plugins');
+const { AndroidConfig, withAndroidManifest } = require('expo/config-plugins');
 
 const { getMainActivityOrThrow } = AndroidConfig.Manifest;
 

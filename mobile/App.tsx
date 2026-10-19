@@ -14,7 +14,8 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Network from 'expo-network';
 import * as SecureStore from 'expo-secure-store';
 import axios from 'axios';
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
 // --- PLATFORM CONDITIONAL WEBRTC IMPORTS ---
@@ -111,6 +112,10 @@ const normalizeServerUrl = (value: string) => {
 };
 
 export default function App() {
+  return <SafeAreaProvider><MobileCall /></SafeAreaProvider>;
+}
+
+function MobileCall() {
   const colorScheme = useColorScheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const isLandscape = windowWidth > windowHeight;
@@ -188,7 +193,7 @@ export default function App() {
   const autoAcceptTimerRef = useRef<TimerRef | null>(null);
   const serverBaseUrlRef = useRef('http://localhost:3000');
 
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const soundRef = useRef<AudioPlayer | null>(null);
 
   const localVideoRef = useRef<any>(null);
   const remoteVideoRef = useRef<any>(null);
@@ -344,18 +349,20 @@ export default function App() {
   const playSound = async (source: any, label: string) => {
     try {
       if (soundRef.current) {
-        await soundRef.current.unloadAsync();
+        soundRef.current.remove();
+        soundRef.current = null;
       }
       
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        interruptionMode: 'duckOthers',
       });
 
-      const { sound } = await Audio.Sound.createAsync(source, { shouldPlay: true, isLooping: true });
+      const sound = createAudioPlayer(source);
+      sound.loop = true;
       soundRef.current = sound;
-      await sound.playAsync();
+      sound.play();
       return true;
     } catch (error) {
       console.warn(`Error playing ${label}:`, error);
@@ -375,8 +382,8 @@ export default function App() {
   const stopRingtone = async () => {
     try {
       if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
+        soundRef.current.pause();
+        soundRef.current.remove();
         soundRef.current = null;
       }
     } catch (error) {
@@ -418,7 +425,7 @@ export default function App() {
       Object.values(viewerPeerConnectionsRef.current).forEach((connection: any) => connection.close());
       localStreamRef.current?.getTracks().forEach((track: any) => track.stop());
       if (soundRef.current) {
-        soundRef.current.unloadAsync();
+        soundRef.current.remove();
       }
     };
   }, []);
@@ -1556,7 +1563,7 @@ export default function App() {
               remoteStream && (
                 <RTCView
                   streamURL={remoteStream.toURL()}
-                  style={StyleSheet.absoluteFillObject}
+                  style={StyleSheet.absoluteFill}
                   objectFit="cover"
                 />
               )
@@ -1616,7 +1623,7 @@ export default function App() {
                 {Platform.OS === 'web' ? (
                   <video ref={localVideoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', backgroundColor: '#000', objectFit: 'cover' } as any} />
                 ) : (
-                  localStream && <RTCView streamURL={localStream.toURL()} style={StyleSheet.absoluteFillObject} objectFit="cover" mirror />
+                  localStream && <RTCView streamURL={localStream.toURL()} style={StyleSheet.absoluteFill} objectFit="cover" mirror />
                 )}
               </View>
               <View className="absolute bottom-4 self-center">

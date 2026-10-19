@@ -13,7 +13,6 @@ function through(...packages) {
 }
 const forge = through('expo', '@expo/cli', '@expo/code-signing-certificates', 'node-forge');
 const braces = through('react-native', '@react-native/community-cli-plugin', 'metro-config', 'metro', 'metro-file-map', 'micromatch', 'braces');
-const { sprintf, vsprintf } = through('react-native', 'babel-jest', '@jest/transform', 'babel-plugin-istanbul', '@istanbuljs/load-nyc-config', 'js-yaml', 'argparse', 'sprintf-js');
 
 const nativeKeys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicExponent: 3 });
 const privateKey = forge.pki.privateKeyFromPem(nativeKeys.privateKey.export({ type: 'pkcs1', format: 'pem' }));
@@ -80,17 +79,4 @@ test('normal brace and parenthesis patterns keep their behavior', () => {
   assert.equal(braces.compile('src/{app,test}.js'), 'src/(app|test).js');
   assert.equal(braces.stringify(braces.parse('src/{app,test}.js')), 'src/{app,test}.js');
   assert.doesNotThrow(() => braces.compile('('.repeat(32) + '{a,b}' + ')'.repeat(32)));
-});
-
-test('formatter rejects excessive width and precision before allocating or formatting', () => {
-  for (const spec of ['%1000000000s', '%.1000000000f', '%.1000000000s', '%999999999999999999999999s']) {
-    assert.throws(() => sprintf(spec, 'x'), error => /format limit/.test(error.message));
-  }
-  assert.throws(() => vsprintf('%1000000000s', ['x']), /format limit/);
-});
-
-test('ordinary formatter output stays compatible with argparse', () => {
-  assert.equal(sprintf('%s %04d %.2f', 'value', 7, 1.25), 'value 0007 1.25');
-  assert.equal(vsprintf('%.3s', ['testing']), 'tes');
-  assert.equal(sprintf('%(name)s', { name: 'test' }), 'test');
 });
