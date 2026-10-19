@@ -1,3 +1,5 @@
+# Runtime versions validated on Python 3.13; refresh the lock after updates.
+-c requirements-lock.txt
 fastapi
 uvicorn
 python-socketio

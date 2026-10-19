@@ -2,6 +2,7 @@
 node_modules/
 npm-debug.log
 pnpm-lock.yaml
+!mobile/pnpm-lock.yaml
 yarn-error.log
 .pnpm-store/
 

@@ -18,7 +18,7 @@ A high-performance WebRTC signaling server built with FastAPI, Uvicorn, and Sock
 
 Ensure you have the following installed:
 
-*   **Python 3.12+** (Developed and tested on 3.13)
+*   **Python 3.13** (runtime lock validated on 3.13)
 *   **pip** (Python package manager)
 *   **Google Chrome** (Recommended for web client)
 

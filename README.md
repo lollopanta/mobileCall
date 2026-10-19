@@ -19,7 +19,7 @@ A modern communication platform featuring a **Python/FastAPI** signaling server 
 
 ## 📦 Prerequisites
 - **Python 3.13+** (Server)
-- **Node.js 18+** (Mobile/Web)
+- **Node.js 22+** (Mobile/Web)
 - **Modern Browser**: For the web version.
 - **Development Client**: Required for Android/iOS native WebRTC support (standard Expo Go is not compatible with WebRTC).
 
@@ -46,7 +46,8 @@ python api/app.py
 Navigate to the `mobile` directory:
 ```bash
 cd mobile
-pnpm install
+corepack enable
+pnpm install --frozen-lockfile
 ```
 
 #### Run on Web
@@ -89,3 +90,17 @@ cd mobile && pnpm exec tsc --noEmit
 ```
 
 Incoming video auto-answer is disabled by default and can be enabled by the recipient in Profile. It applies to family caregiver calls after an audible warning; the caller cannot override the recipient's setting. Existing outgoing-call preferences are not reused as consent.
+
+Dependency versions are recorded in `mobile/pnpm-lock.yaml` and `server/requirements-lock.txt`. Mobile uses pnpm 12; security overrides live in `mobile/pnpm-workspace.yaml`. Server installation applies the runtime lock through `requirements.txt`; use Python 3.13. After native dependency changes, rebuild the development client before testing on a device.
+
+To repeat the dependency checks:
+
+```bash
+cd mobile
+pnpm audit
+# Return to the repository root, with pip-audit installed separately:
+cd ..
+pip-audit --no-deps --disable-pip -r server/requirements-lock.txt
+```
+
+`pnpm audit` currently reports three unresolved upstream advisories; see `AUDIT.md`. These findings are not suppressed.

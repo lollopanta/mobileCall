@@ -165,6 +165,68 @@ class AuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.get('/user/member').status_code, 200)
         self.assertEqual(client.post('/api/profile/upload-direct', files={'image': ('fake.jpg', b'not an image', 'image/jpeg')}).status_code, 400)
 
+    async def test_socketio_transport_preserves_family_isolation(self):
+        import socket
+        import socketio
+        import uvicorn
+        conn = setupDB.get_connection()
+        conn.execute("INSERT INTO families (name) VALUES ('Other family')")
+        family_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        conn.execute('UPDATE users SET family_id = ? WHERE id = ?', (family_id, self.user['id']))
+        conn.commit()
+        conn.close()
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(api.sio_asgi_app, lifespan='off', log_level='error'))
+        server_task = asyncio.create_task(server.serve(sockets=[listener]))
+        first, second = socketio.AsyncClient(), socketio.AsyncClient()
+        candidates = asyncio.Queue()
+        first.on('ice-candidate', lambda data: candidates.put_nowait(data))
+        async def wait_started():
+            while not server.started:
+                if server_task.done():
+                    await server_task
+                await asyncio.sleep(0.01)
+        try:
+            await asyncio.wait_for(wait_started(), 5)
+            await first.connect(f'http://127.0.0.1:{port}', transports=['websocket'])
+            await second.connect(f'http://127.0.0.1:{port}', transports=['websocket'])
+            await first.call('join', {'token': api.generate_token('grandparent'), 'deviceId': 'first'}, timeout=3)
+            await second.call('join', {'token': api.generate_token('member'), 'deviceId': 'second'}, timeout=3)
+            await second.call('ice-candidate', {'to': first.get_sid(), 'candidate': {'candidate': 'blocked'}}, timeout=3)
+            self.assertTrue(candidates.empty())
+            conn = setupDB.get_connection()
+            conn.execute('UPDATE users SET family_id = 1 WHERE id = ?', (self.user['id'],))
+            conn.commit()
+            conn.close()
+            await second.call('join', {'token': api.generate_token('member'), 'deviceId': 'second'}, timeout=3)
+            await second.call('ice-candidate', {'to': first.get_sid(), 'candidate': {'candidate': 'allowed'}}, timeout=3)
+            candidate = await asyncio.wait_for(candidates.get(), 3)
+            self.assertEqual(candidate['candidate']['candidate'], 'allowed')
+            rooms = api.sio.rooms(second.get_sid())
+            self.assertNotIn(f'family_{family_id}', rooms)
+        finally:
+            await first.disconnect()
+            await second.disconnect()
+            server.should_exit = True
+            await asyncio.wait_for(server_task, 5)
+            listener.close()
+
+    def test_opencv_face_detection_and_crop(self):
+        from PIL import Image
+        source = Path(self.temp.name) / 'source.png'
+        output = Path(self.temp.name) / 'crop.jpg'
+        Image.new('RGB', (100, 100), 'white').save(source)
+        faces, shape = api.image_processor.detect_faces(str(source))
+        self.assertEqual(faces, [])
+        self.assertEqual(shape[:2], (100, 100))
+        api.image_processor.crop_face(str(source), 10, 10, 20, 20, str(output))
+        with Image.open(output) as cropped:
+            self.assertEqual(cropped.size, (28, 28))
+        with self.assertRaises(ValueError):
+            api.image_processor.crop_face(str(source), 200, 200, 20, 20, str(output))
+
     def test_sensor_decodes_minimum_signed_value(self):
         sensor = FallSensorService.__new__(FallSensorService)
         from unittest.mock import Mock
