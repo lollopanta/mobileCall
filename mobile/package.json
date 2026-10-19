@@ -7,7 +7,9 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:security": "node --test tests/security-dependencies.test.cjs",
+    "test:browser": "node tests/browser-smoke.cjs"
   },
   "dependencies": {
     "@config-plugins/react-native-webrtc": "^13.0.0",
@@ -42,6 +44,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "playwright": "^1.64.1",
     "typescript": "~5.9.2"
   },
   "private": true,

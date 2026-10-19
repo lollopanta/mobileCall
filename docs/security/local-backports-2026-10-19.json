@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-19",
+  "status": "Three installed toolchain entrypoints protected by local patches; raw upstream advisories remain visible.",
+  "patches": [
+    {
+      "file": "mobile/patches/braces@3.0.3.patch",
+      "sha256": "19f32bfaae53b0177fa21ba00eb1e16a9a1f5dc0cd12998dc4bd28da625ec732"
+    },
+    {
+      "file": "mobile/patches/node-forge@1.4.0.patch",
+      "sha256": "e324388236832e1bc81e7a9a9486550c30c09d085dc8d84d38d0a20b80eac2b2"
+    },
+    {
+      "file": "mobile/patches/sprintf-js@1.0.3.patch",
+      "sha256": "87e44e33d528023c8d4f192138b613b381c97f547c61795cebb142965c3d6ab1"
+    }
+  ],
+  "raw_mobile_scanner": {
+    "info": 0,
+    "low": 0,
+    "moderate": 1,
+    "high": 2,
+    "critical": 0
+  },
+  "regression_tests": {
+    "dependency_security": 8,
+    "backend": 15,
+    "clean_install_security": 8
+  },
+  "browser": {
+    "result": "passed",
+    "engine": "Chromium headless, two isolated contexts",
+    "media": "simulated camera and microphone; actual bidirectional RTP",
+    "checks": [
+      "registration and login",
+      "family creation and invitation acceptance",
+      "automatic family presence",
+      "recipient manually accepts incoming call",
+      "audio/video and audio-only calls",
+      "outgoing ICE uses the socket chosen by the server",
+      "hangup closes peer connections and media tracks",
+      "session restore on reload",
+      "declined call cleanup",
+      "logout clears stored token",
+      "no uncaught JavaScript errors"
+    ]
+  },
+  "builds": {
+    "web": "passed",
+    "android_javascript": "passed with --no-bytecode",
+    "ios_javascript": "passed with --no-bytecode",
+    "hermes_bytecode": "not verified: bundled Linux compiler is x86-64; host is ARM64"
+  },
+  "physical_devices": "not tested",
+  "database": "existing local database excluded from tests and commits",
+  "patch_notes": "mobile/patches/README.md"
+}

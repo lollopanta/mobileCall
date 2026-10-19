@@ -103,4 +103,22 @@ cd ..
 pip-audit --no-deps --disable-pip -r server/requirements-lock.txt
 ```
 
-`pnpm audit` currently reports three unresolved upstream advisories; see `AUDIT.md`. These findings are not suppressed.
+`pnpm audit` still reports three upstream package versions. Their used entrypoints now have versioned local security backports; run `pnpm run test:security` and see `AUDIT.md` and `mobile/patches/README.md`. The raw findings are not suppressed.
+
+To run the dependency regression tests and the two-browser calling smoke test:
+
+```bash
+cd mobile
+pnpm install --frozen-lockfile
+pnpm run test:security
+pnpm exec playwright install --with-deps chromium --only-shell
+pnpm exec expo export --platform web
+pnpm run test:browser
+```
+
+The browser test starts an isolated Python server with a temporary database. It
+registers two users, creates/joins a family, checks incoming-call consent, exchanges
+actual audio/video RTP using simulated camera/microphone devices, verifies ICE
+routing, hangs up, reloads a session, declines a call, and logs out. It never uses
+the project database. Override `PYTHON` if the server virtualenv is elsewhere.
+Native device and physical fall-sensor checks remain separate from browser tests.

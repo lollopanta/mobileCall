@@ -170,6 +170,7 @@ export default function App() {
   const peerConnectionRef = useRef<any>(null);
   const viewerPeerConnectionsRef = useRef<Record<string, any>>({});
   const pendingIceCandidatesRef = useRef<Record<string, any[]>>({});
+  const pendingLocalIceCandidatesRef = useRef<any[]>([]);
   const autoAcceptVideoCallsRef = useRef(false);
   const localStreamRef = useRef<any>(null);
   const [localStream, setLocalStream] = useState<any>(null);
@@ -688,6 +689,12 @@ export default function App() {
     }
   }, [authToken, userProfile, deviceId]);
 
+  useEffect(() => {
+    if (authToken && deviceId && socketRef.current?.connected) {
+      socketRef.current.emit('join', { token: authToken, deviceId });
+    }
+  }, [authToken, deviceId, userProfile?.family_id, userProfile?.role]);
+
   const getAuthHeaders = () => ({
     headers: { 'Authorization': `Bearer ${authToken}` }
   });
@@ -899,6 +906,13 @@ export default function App() {
       remoteViewerSocketIdRef.current = data.viewerSid || null;
       viewerSocketIdRef.current = data.localViewerSid || data.viewerSid || null;
       controllerSocketIdRef.current = data.controllerSid || null;
+      remoteSocketIdRef.current = data.controllerSid || null;
+      if (data.controllerSid) {
+        for (const candidate of pendingLocalIceCandidatesRef.current) {
+          socketRef.current?.emit('ice-candidate', { to: data.controllerSid, candidate });
+        }
+        pendingLocalIceCandidatesRef.current = [];
+      }
       if (data.isVideo && data.viewerSid && data.controllerSid && data.viewerSid !== data.controllerSid && localStreamRef.current) {
         startViewerMirrorConnection(data.viewerSid).catch((error) => {
           console.warn('Error starting viewer mirror connection:', error);
@@ -924,9 +938,9 @@ export default function App() {
         return;
       }
       if (peerConnectionRef.current) {
+        remoteSocketIdRef.current = data.from;
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
         await flushIceCandidates(data.from, peerConnectionRef.current);
-        remoteSocketIdRef.current = data.from;
         setCallStatus('connected');
         stopRingtone();
       }
@@ -1117,7 +1131,14 @@ export default function App() {
       peerConnectionRef.current.addTransceiver('video', { direction: 'recvonly' });
     }
     peerConnectionRef.current.onicecandidate = (event: any) => {
-      if (event.candidate) socketRef.current?.emit('ice-candidate', { to: targetId, candidate: event.candidate });
+      if (!event.candidate) return;
+      // Offers address a user ID; ICE must wait for the server's chosen socket.
+      const destination = remoteSocketIdRef.current;
+      if (destination) {
+        socketRef.current?.emit('ice-candidate', { to: destination, candidate: event.candidate });
+      } else if (pendingLocalIceCandidatesRef.current.length < 128) {
+        pendingLocalIceCandidatesRef.current.push(event.candidate);
+      }
     };
     peerConnectionRef.current.ontrack = (event: any) => {
       const incomingStream = event.streams[0];
@@ -1233,7 +1254,7 @@ export default function App() {
           });
           receiveOnly = true;
         } else {
-          stopRingtone();
+          endCall(false);
           return;
         }
       }
@@ -1402,6 +1423,7 @@ export default function App() {
     Object.values(viewerPeerConnectionsRef.current).forEach((connection: any) => connection.close());
     viewerPeerConnectionsRef.current = {};
     pendingIceCandidatesRef.current = {};
+    pendingLocalIceCandidatesRef.current = [];
     if (localStreamRef.current) { 
       localStreamRef.current.getTracks().forEach((t: any) => t.stop()); 
       localStreamRef.current = null; 
@@ -1540,7 +1562,7 @@ export default function App() {
               )
             )}
             {!isViewerDevice && (
-              <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
+              <Pressable accessibilityLabel="End call" onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
                 <MaterialIcons name="call-end" size={32} color="#fff" />
               </Pressable>
             )}
@@ -1567,11 +1589,11 @@ export default function App() {
           )}
           {isIncomingCall ? (
             <View className="flex-row mt-10 gap-5">
-              <Pressable onPress={() => acceptCall(offerDataRef.current, isViewerDevice ? 'video-only' : false)} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
+              <Pressable accessibilityLabel="Accept call" onPress={() => acceptCall(offerDataRef.current, isViewerDevice ? 'video-only' : false)} className="w-20 h-20 rounded-full justify-center items-center bg-emerald-500">
                 <MaterialIcons name="call" size={32} color="#fff" />
               </Pressable>
               {!isViewerDevice && (
-                <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                <Pressable accessibilityLabel="Decline call" onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
                 </Pressable>
               )}
@@ -1598,7 +1620,7 @@ export default function App() {
                 )}
               </View>
               <View className="absolute bottom-4 self-center">
-                <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                <Pressable accessibilityLabel="End call" onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
                 </Pressable>
               </View>
@@ -1606,7 +1628,7 @@ export default function App() {
           ) : callStatus === 'ringing' ? (
             <View className="flex-row mt-10 gap-5">
               {!isViewerDevice && (
-                <Pressable onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
+                <Pressable accessibilityLabel="Decline call" onPress={declineCall} className="w-20 h-20 rounded-full justify-center items-center bg-red-500">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
                 </Pressable>
               )}
@@ -1619,7 +1641,7 @@ export default function App() {
                 remoteStream && <RTCView streamURL={remoteStream.toURL()} style={{ flex: 1, backgroundColor: '#000' }} objectFit={remoteVideoObjectFit} />
               )}
               {!isViewerDevice && (
-                <Pressable onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
+                <Pressable accessibilityLabel="End call" onPress={() => endCall(true)} className="w-20 h-20 rounded-full justify-center items-center bg-red-500 absolute bottom-10 self-center">
                   <MaterialIcons name="call-end" size={32} color="#fff" />
                 </Pressable>
               )}
@@ -1661,7 +1683,7 @@ export default function App() {
         {/* Header */}
         <View className="p-5 pt-10 bg-bg-card flex-row justify-between items-center border-b border-glass-border">
           <Text className="text-text-main text-xl font-bold tracking-widest">{view.toUpperCase()}</Text>
-          <Pressable onPress={handleLogout}>
+          <Pressable accessibilityLabel="Log out" onPress={handleLogout}>
             <MaterialIcons
               name="logout"
               size={24}
@@ -1707,10 +1729,10 @@ export default function App() {
                       </Text>
                     </View>
                     <View className="flex-row">
-                      <Pressable onPress={() => initiateCall(item.id, item.name, false)} className="p-3 rounded-xl ml-2.5 bg-emerald-500">
+                      <Pressable accessibilityLabel={`Call ${item.name}`} onPress={() => initiateCall(item.id, item.name, false)} className="p-3 rounded-xl ml-2.5 bg-emerald-500">
                         <MaterialIcons name="call" size={20} color="#fff" />
                       </Pressable>
-                      <Pressable onPress={() => initiateCall(item.id, item.name, true)} className="p-3 rounded-xl ml-2.5 bg-purple-600">
+                      <Pressable accessibilityLabel={`Video call ${item.name}`} onPress={() => initiateCall(item.id, item.name, true)} className="p-3 rounded-xl ml-2.5 bg-purple-600">
                         <MaterialIcons name="videocam" size={20} color="#fff" />
                       </Pressable>
                     </View>

@@ -1,0 +1,14 @@
+diff --git a/src/sprintf.js b/src/sprintf.js
+--- a/src/sprintf.js
++++ b/src/sprintf.js
+@@ -30,6 +30,10 @@
+             }
+             else if (node_type === "array") {
+                 match = parse_tree[i] // convenience purposes only
++                // Bound allocation and formatting before evaluating the argument.
++                if (Number(match[6]) > 100000 || Number(match[7]) > 100000) {
++                    throw new RangeError('[sprintf] format limit exceeded')
++                }
+                 if (match[2]) { // keyword argument
+                     arg = argv[cursor]
+                     for (k = 0; k < match[2].length; k++) {
