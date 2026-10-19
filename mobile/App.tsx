@@ -27,6 +27,7 @@ let RTCView: any;
 let MediaStream: any;
 
 if (Platform.OS === 'web') {
+  MediaStream = window.MediaStream;
   RTCPeerConnection = window.RTCPeerConnection;
   RTCIceCandidate = window.RTCIceCandidate;
   RTCSessionDescription = window.RTCSessionDescription;
@@ -141,6 +142,9 @@ function MobileCall() {
   const [pendingInvitations, setPendingInvitations] = useState<any[]>([]);
   const [notificationsBadge, setNotificationsBadge] = useState(false);
   const [familySettings, setFamilySettings] = useState<FamilySettingsState>({ idle_timeout: 5 });
+  const familyActionRef = useRef(false);
+  const [familyAction, setFamilyAction] = useState<string | null>(null);
+  const [familyFeedback, setFamilyFeedback] = useState<{ error: boolean; message: string } | null>(null);
   const [selectedInviteRoles, setSelectedInviteRoles] = useState<Record<number, 'caregiver' | 'grandparent'>>({});
 
   // Ambient Mode State
@@ -178,6 +182,7 @@ function MobileCall() {
   const pendingLocalIceCandidatesRef = useRef<any[]>([]);
   const autoAcceptVideoCallsRef = useRef(false);
   const localStreamRef = useRef<any>(null);
+  const remoteStreamRef = useRef<any>(null);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
   const remoteSocketIdRef = useRef<string | null>(null);
@@ -250,6 +255,8 @@ function MobileCall() {
     socketRef.current?.disconnect();
     setAuthToken(null);
     setUserProfile(null);
+    setSelectedInviteRoles({});
+    setFamilyFeedback(null);
     currentUserIdRef.current = null;
     setIsJoined(false);
     setUsers([]);
@@ -284,6 +291,7 @@ function MobileCall() {
       const res = await axios.get(`${baseUrl}/api/device-pairing/status`, {
         headers: { Authorization: `Bearer ${tokenToUse}` },
         params: { device_id: deviceIdToUse },
+        timeout: 15000,
       });
       debugLog('fetchDevicePairingStatus:response', res.data);
       updateDeviceMode(res.data.device_mode || 'standard');
@@ -658,17 +666,19 @@ function MobileCall() {
   }, [isIdle, albumPhotos]);
 
   const fetchFamilySettings = async () => {
-    if (!authToken) return;
+    if (!authToken) return false;
     const baseUrl = getBaseUrl();
     try {
-      const res = await axios.get(`${baseUrl}/api/family/settings`, getAuthHeaders());
+      const res = await axios.get(`${baseUrl}/api/family/settings`, { ...getAuthHeaders(), timeout: 15000 });
       if (res.data.status === 'successful') {
         setFamilySettings(res.data.settings);
         if (res.data.settings.google_photos_album_url) {
           fetchFamilyPhotos();
         }
+        return true;
       }
-    } catch (e) {}
+      return false;
+    } catch (e) { return false; }
   };
 
   const fetchFamilyPhotos = async () => {
@@ -707,53 +717,104 @@ function MobileCall() {
   });
 
   const fetchProfile = async () => {
-    if (!authToken) return;
+    if (!authToken) return false;
     const baseUrl = getBaseUrl();
     try {
-      const res = await axios.get(`${baseUrl}/api/profile`, getAuthHeaders());
+      const res = await axios.get(`${baseUrl}/api/profile`, { ...getAuthHeaders(), timeout: 15000 });
       setUserProfile(res.data.user);
       currentUserIdRef.current = res.data.user?.id ?? null;
       setIsVoipEligible(res.data.user.is_voip_eligible);
       await storage.setItem(STORAGE_KEYS.userProfile, JSON.stringify(res.data.user));
       await fetchDevicePairingStatus(authToken, res.data.user, deviceId);
       if (res.data.user.family_id) {
-        fetchFamilyMembers();
+        if (!await fetchFamilyMembers()) return false;
       }
+      return true;
     } catch (e) {
       if (axios.isAxiosError(e) && (e.response?.status === 401 || e.response?.status === 403)) {
         await handleLogout();
       }
+      return false;
     }
   };
 
   const fetchNotifications = async () => {
-    if (!authToken) return;
+    if (!authToken) return false;
     const baseUrl = getBaseUrl();
     try {
-      const res = await axios.get(`${baseUrl}/api/notifications`, getAuthHeaders());
+      const res = await axios.get(`${baseUrl}/api/notifications`, { ...getAuthHeaders(), timeout: 15000 });
       if (res.data.status === 'successful') {
         setPendingInvitations(res.data.notifications);
         setNotificationsBadge(res.data.notifications.length > 0);
-        setSelectedInviteRoles((prev) => {
-          const next = { ...prev };
-          for (const invitation of res.data.notifications) {
-            if (!next[invitation.id]) next[invitation.id] = 'caregiver';
-          }
-          return next;
-        });
+        return true;
       }
-    } catch (e) {}
+      return false;
+    } catch (e) { return false; }
   };
 
   const fetchFamilyMembers = async () => {
-    if (!authToken) return;
+    if (!authToken) return false;
     const baseUrl = getBaseUrl();
     try {
-      const res = await axios.get(`${baseUrl}/api/family/members`, getAuthHeaders());
+      const res = await axios.get(`${baseUrl}/api/family/members`, { ...getAuthHeaders(), timeout: 15000 });
       if (res.data.status === 'successful') {
         setFamilyMembers(res.data.members);
+        return true;
       }
-    } catch (e) {}
+      return false;
+    } catch (e) { return false; }
+  };
+
+  const runFamilyAction = async (
+    key: string, path: string, payload: object, successMessage: string,
+    refresh: () => Promise<boolean>,
+  ) => {
+    // The ref also blocks rapid taps before React renders the disabled button.
+    if (familyActionRef.current) return;
+    familyActionRef.current = true;
+    setFamilyAction(key);
+    setFamilyFeedback(null);
+    try {
+      const response = await axios.post(`${getBaseUrl()}${path}`, payload, { ...getAuthHeaders(), timeout: 15000 });
+      if (response.data.status !== 'successful') throw new Error(response.data.message || 'Operation failed.');
+    } catch (error) {
+      const knownMessages: Record<string, string> = {
+        ALREADY_PENDING: 'An invitation is already pending for this person.',
+        ALREADY_IN_FAMILY: 'This person already belongs to a family.',
+        'Invitation not found': 'This invitation is no longer available. Refresh the invitations.',
+      };
+      let message = 'The operation could not be completed. Please try again.';
+      if (axios.isAxiosError(error)) {
+        const detail = error.response?.data?.message || error.response?.data?.detail;
+        if (typeof detail === 'string') message = knownMessages[detail] || detail;
+        else if (!error.response) message = 'The server did not confirm the operation. Check your connection and refresh before trying again.';
+      } else if (error instanceof Error) message = error.message;
+      setFamilyFeedback({ error: true, message });
+      familyActionRef.current = false;
+      setFamilyAction(null);
+      return;
+    }
+    // A failed refresh must not be reported as a failed write: it already succeeded.
+    let refreshed = false;
+    try { refreshed = await refresh(); } catch {}
+    setFamilyFeedback({ error: !refreshed, message: refreshed ? successMessage : `${successMessage} The updated data could not be loaded. Please refresh.` });
+    familyActionRef.current = false;
+    setFamilyAction(null);
+  };
+
+  const respondToInvitation = async (inviteId: number, accepted: boolean) => {
+    const role = selectedInviteRoles[inviteId];
+    if (accepted && !role) {
+      setFamilyFeedback({ error: true, message: 'Choose Caregiver or Grandparent before accepting.' });
+      return;
+    }
+    await runFamilyAction(`invite-${inviteId}`, '/api/notifications/respond', {
+      invite_id: inviteId, response: accepted ? 'accepted' : 'rejected', ...(accepted ? { role } : {}),
+    }, accepted ? 'Invitation accepted.' : 'Invitation declined.', async () => {
+      setPendingInvitations(previous => previous.filter(invitation => invitation.id !== inviteId));
+      const results = await Promise.all([fetchNotifications(), ...(accepted ? [fetchProfile()] : [])]);
+      return results.every(Boolean);
+    });
   };
 
   const handleJoin = (tokenToUse: string | null = authToken, serverUrlOverride?: string, deviceIdOverride?: string) => {
@@ -772,6 +833,7 @@ function MobileCall() {
     socketRef.current = io(socketUrl, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
+      tryAllTransports: true,
       forceNew: true,
       secure: socketUrl.startsWith('https://'),
       timeout: 10000,
@@ -920,11 +982,6 @@ function MobileCall() {
         }
         pendingLocalIceCandidatesRef.current = [];
       }
-      if (data.isVideo && data.viewerSid && data.controllerSid && data.viewerSid !== data.controllerSid && localStreamRef.current) {
-        startViewerMirrorConnection(data.viewerSid).catch((error) => {
-          console.warn('Error starting viewer mirror connection:', error);
-        });
-      }
     });
 
     socketRef.current.on('answer', async (data) => {
@@ -938,6 +995,7 @@ function MobileCall() {
         remoteViewerSocketId: remoteViewerSocketIdRef.current,
         controllerSocketId: controllerSocketIdRef.current,
       });
+      if (data.sessionId && data.sessionId !== activeSessionIdRef.current) return;
       const viewerPeerConnection = viewerPeerConnectionsRef.current[data.from];
       if (viewerPeerConnection) {
         await viewerPeerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -950,6 +1008,10 @@ function MobileCall() {
         await flushIceCandidates(data.from, peerConnectionRef.current);
         setCallStatus('connected');
         stopRingtone();
+        const viewerSid = remoteViewerSocketIdRef.current;
+        if (viewerSid && localStreamRef.current) {
+          startViewerMirrorConnection(viewerSid).catch(error => console.warn('Viewer connection failed:', error));
+        }
       }
     });
 
@@ -978,6 +1040,14 @@ function MobileCall() {
       setIsAutoAcceptingCall(false);
       stopRingtone();
       endCall(false);
+    });
+
+    socketRef.current.on('viewer-disconnected', (data) => {
+      const connection = viewerPeerConnectionsRef.current[data.viewerSid];
+      connection?.close();
+      delete viewerPeerConnectionsRef.current[data.viewerSid];
+      if (localViewerSocketIdRef.current === data.viewerSid) localViewerSocketIdRef.current = null;
+      if (remoteViewerSocketIdRef.current === data.viewerSid) remoteViewerSocketIdRef.current = null;
     });
 
     socketRef.current.on('end-call', () => {
@@ -1148,7 +1218,11 @@ function MobileCall() {
       }
     };
     peerConnectionRef.current.ontrack = (event: any) => {
-      const incomingStream = event.streams[0];
+      const incomingStream = event.streams?.[0] || remoteStreamRef.current || new MediaStream();
+      if (!incomingStream.getTracks().some((track: any) => track.id === event.track.id)) {
+        incomingStream.addTrack(event.track);
+      }
+      remoteStreamRef.current = incomingStream;
       setRemoteStream(incomingStream);
       const localViewerSid = localViewerSocketIdRef.current;
       if (isVideoCallRef.current && localViewerSid && incomingStream && !viewerPeerConnectionsRef.current[localViewerSid]) {
@@ -1200,14 +1274,16 @@ function MobileCall() {
     const sourceStream = mirrorStream || localStreamRef.current;
     if (!RTCPeerConnection || !sourceStream || getVideoTracks(sourceStream).length === 0) return;
     viewerSocketIdRef.current = viewerSid;
-    if (viewerPeerConnectionsRef.current[viewerSid]) {
-      viewerPeerConnectionsRef.current[viewerSid].close();
-      delete viewerPeerConnectionsRef.current[viewerSid];
-    }
+    // Reserve the connection before awaiting SDP so audio/video track events
+    // cannot start competing negotiations for the same display.
+    if (viewerPeerConnectionsRef.current[viewerSid]) return;
     const viewerPeerConnection = setupViewerPeerConnection(viewerSid, sourceStream);
     if (!viewerPeerConnection) return;
+    const sessionId = activeSessionIdRef.current;
     const offer = await viewerPeerConnection.createOffer();
+    if (viewerPeerConnectionsRef.current[viewerSid] !== viewerPeerConnection) return;
     await viewerPeerConnection.setLocalDescription(offer);
+    if (sessionId !== activeSessionIdRef.current || viewerPeerConnectionsRef.current[viewerSid] !== viewerPeerConnection) return;
     const localOffer = serializeSessionDescription(viewerPeerConnection.localDescription);
     socketRef.current?.emit('offer', {
       to: viewerSid,
@@ -1225,6 +1301,10 @@ function MobileCall() {
     }
     if (deviceModeRef.current === 'viewer') {
       Alert.alert('Unavailable', 'Use the active call device to place calls. This display device is receive-only.');
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      Alert.alert('Connection unavailable', 'Wait for the server connection before calling.');
       return;
     }
     try {
@@ -1445,6 +1525,7 @@ function MobileCall() {
     controllerSocketIdRef.current = null;
     isVideoCallRef.current = false;
     setLocalStream(null);
+    remoteStreamRef.current = null;
     setRemoteStream(null);
     setCallStatus('idle');
     setIsIncomingCall(false);
@@ -1700,6 +1781,27 @@ function MobileCall() {
         </View>
 
         <ScrollView className="flex-1">
+          {['family', 'family_settings', 'notifications'].includes(view) && (
+            <View className="px-5 pt-3">
+              {familyAction && <Text accessibilityLiveRegion="polite" className="text-text-dim">Operation in progress…</Text>}
+              {familyFeedback && <Text accessibilityRole="alert" accessibilityLiveRegion="polite" className={familyFeedback.error ? 'text-red-400 mb-3' : 'text-emerald-400 mb-3'}>{familyFeedback.message}</Text>}
+              <Pressable disabled={Boolean(familyAction)} onPress={async () => {
+                if (familyActionRef.current) return;
+                familyActionRef.current = true;
+                setFamilyAction('refresh');
+                setFamilyFeedback(null);
+                try {
+                  const results = await Promise.all([fetchProfile(), fetchNotifications(), ...(userProfile?.family_id ? [fetchFamilySettings()] : [])]);
+                  setFamilyFeedback(results.every(Boolean) ? { error: false, message: 'Data refreshed.' } : { error: true, message: 'Some data could not be loaded. Check your connection and try again.' });
+                } catch {
+                  setFamilyFeedback({ error: true, message: 'Could not refresh. Please try again.' });
+                } finally {
+                  familyActionRef.current = false;
+                  setFamilyAction(null);
+                }
+              }}><Text className="text-purple-400">Refresh family data</Text></Pressable>
+            </View>
+          )}
           {view === 'main' && (
             <View className="p-5">
               {isSplitGrandparent && (
@@ -1908,21 +2010,14 @@ function MobileCall() {
                     </View>
                   </View>
 
-                  <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
-                    if (!newFamilyName) {
-                      Alert.alert('Error', 'Please enter a family name');
+                  <Pressable disabled={Boolean(familyAction)} accessibilityState={{ disabled: Boolean(familyAction), busy: familyAction === 'create' }} className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={() => {
+                    if (!newFamilyName.trim()) {
+                      setFamilyFeedback({ error: true, message: 'Please enter a family name.' });
                       return;
                     }
-                    const baseUrl = getBaseUrl();
-                    try {
-                      await axios.post(`${baseUrl}/api/family/create`, { 
-                        name: newFamilyName,
-                        role: newFamilyAdminRole
-                      }, getAuthHeaders());
-                      fetchProfile();
-                    } catch(e) {}
+                    void runFamilyAction('create', '/api/family/create', { name: newFamilyName.trim(), role: newFamilyAdminRole }, 'Family created.', fetchProfile);
                   }}>
-                    <Text className="text-white font-bold">Create New Family</Text>
+                    <Text className="text-white font-bold">{familyAction === 'create' ? 'Creating…' : 'Create New Family'}</Text>
                   </Pressable>
                 </View>
               ) : (
@@ -1975,17 +2070,12 @@ function MobileCall() {
                       <Pressable
                         key={member.id}
                         className={`p-4 rounded-xl border mb-3 ${member.is_primary_grandparent ? 'bg-purple-600 border-purple-700' : 'bg-bg-main border-glass-border'}`}
-                        onPress={async () => {
-                          const baseUrl = getBaseUrl();
-                          try {
-                            await axios.post(`${baseUrl}/api/family/primary-grandparent`, { member_id: member.id }, getAuthHeaders());
-                            fetchFamilyMembers();
-                            fetchFamilySettings();
-                            fetchProfile();
-                          } catch (e) {
-                            Alert.alert('Error', 'Could not update the primary grandparent');
-                          }
-                        }}
+                        disabled={Boolean(familyAction)}
+                        accessibilityState={{ disabled: Boolean(familyAction), busy: familyAction === 'primary' }}
+                        onPress={() => runFamilyAction('primary', '/api/family/primary-grandparent', { member_id: member.id }, 'Primary grandparent updated.', async () => {
+                          const results = await Promise.all([fetchFamilyMembers(), fetchFamilySettings(), fetchProfile()]);
+                          return results.every(Boolean);
+                        })}
                       >
                         <Text className={member.is_primary_grandparent ? 'text-white font-bold' : 'text-text-main font-bold'}>{member.username}</Text>
                         <Text className={member.is_primary_grandparent ? 'text-white/80 text-xs mt-1' : 'text-text-dim text-xs mt-1'}>
@@ -2021,15 +2111,8 @@ function MobileCall() {
                   ))}
                 </View>
 
-                <Pressable className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={async () => {
-                   const baseUrl = getBaseUrl();
-                   try {
-                     await axios.post(`${baseUrl}/api/family/settings`, familySettings, getAuthHeaders());
-                     Alert.alert('Success', 'Settings saved');
-                     fetchFamilySettings();
-                   } catch (e) { Alert.alert('Error', 'Update failed'); }
-                }}>
-                  <Text className="text-white font-bold">Save Settings</Text>
+                <Pressable disabled={Boolean(familyAction)} accessibilityState={{ disabled: Boolean(familyAction), busy: familyAction === 'settings' }} className="p-4 rounded-xl bg-purple-600 items-center border border-purple-700" onPress={() => runFamilyAction('settings', '/api/family/settings', familySettings, 'Settings saved.', fetchFamilySettings)}>
+                  <Text className="text-white font-bold">{familyAction === 'settings' ? 'Saving…' : 'Save Settings'}</Text>
                 </Pressable>
               </View>
             </View>
@@ -2059,24 +2142,12 @@ function MobileCall() {
                         </Pressable>
                       ))}
                     </View>
+                    {!selectedInviteRoles[inv.id] && <Text className="text-text-dim mb-3">Select a role to enable Accept.</Text>}
                     <View className="flex-row gap-2.5">
-                      <Pressable className="flex-1 p-3 rounded-xl bg-emerald-500 items-center justify-center" onPress={async () => {
-                        const baseUrl = getBaseUrl();
-                        await axios.post(`${baseUrl}/api/notifications/respond`, {
-                          invite_id: inv.id,
-                          response: 'accepted',
-                          role: selectedInviteRoles[inv.id] || 'caregiver',
-                        }, getAuthHeaders());
-                        fetchNotifications();
-                        fetchProfile();
-                      }}>
-                        <Text className="text-white font-bold">Accept</Text>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Accept invitation" disabled={Boolean(familyAction) || !selectedInviteRoles[inv.id]} accessibilityState={{ disabled: Boolean(familyAction) || !selectedInviteRoles[inv.id], busy: familyAction === `invite-${inv.id}` }} className="flex-1 p-3 rounded-xl bg-emerald-500 items-center justify-center" onPress={() => respondToInvitation(inv.id, true)}>
+                        <Text className="text-white font-bold">{familyAction === `invite-${inv.id}` ? 'Processing…' : 'Accept'}</Text>
                       </Pressable>
-                      <Pressable className="flex-1 p-3 rounded-xl bg-red-500 items-center justify-center" onPress={async () => {
-                        const baseUrl = getBaseUrl();
-                        await axios.post(`${baseUrl}/api/notifications/respond`, { invite_id: inv.id, response: 'rejected' }, getAuthHeaders());
-                        fetchNotifications();
-                      }}>
+                      <Pressable disabled={Boolean(familyAction)} className="flex-1 p-3 rounded-xl bg-red-500 items-center justify-center" onPress={() => respondToInvitation(inv.id, false)}>
                         <Text className="text-white font-bold">Decline</Text>
                       </Pressable>
                     </View>

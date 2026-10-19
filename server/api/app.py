@@ -1325,6 +1325,11 @@ async def handle_offer(sid, data):
             }, to=local_viewer_sid)
         return
 
+    if data.get('mirrorOnly') is True:
+        session = call_sessions.get(data.get('sessionId'))
+        if not session or not session.get('accepted') or target_to not in (session.get('viewer_sid'), session.get('local_viewer_sid')):
+            return
+
     await sio.emit('offer', {
         'from': sid,
         'fromName': sender_name,
@@ -1351,8 +1356,9 @@ async def handle_answer(sid, data):
     if not answer_payload:
         print(f"[ANSWER] Invalid SDP payload from {sid}: {data.get('answer')}")
         return
-    if session_id and session_id in call_sessions:
+    if session_id and session_id in call_sessions and call_sessions[session_id].get("controller_sid") == sid:
         session = call_sessions[session_id]
+        session["accepted"] = True
         if session.get("controller_sid"):
             await sio.emit('call-controller-state', {
                 'sessionId': session_id,
@@ -1430,7 +1436,14 @@ async def handle_disconnect(sid):
             "device_mode": user_info.get("device_mode"),
         })
         session_id, session = get_call_session_by_sid_sync(sid)
-        if session_id and session:
+        if session_id and session and sid in (session.get('viewer_sid'), session.get('local_viewer_sid')):
+            for key in ('viewer_sid', 'local_viewer_sid'):
+                if session.get(key) == sid:
+                    session[key] = None
+            for target_sid in (session.get('caller_sid'), session.get('controller_sid')):
+                if target_sid:
+                    await sio.emit('viewer-disconnected', {'viewerSid': sid, 'sessionId': session_id}, to=target_sid)
+        elif session_id and session:
             end_call_session_sync(session_id)
             for target_sid in [session.get("caller_sid"), session.get("viewer_sid"), session.get("controller_sid"), session.get("local_viewer_sid")]:
                 if target_sid and target_sid != sid:

@@ -122,3 +122,9 @@ actual audio/video RTP using simulated camera/microphone devices, verifies ICE
 routing, hangs up, reloads a session, declines a call, and logs out. It never uses
 the project database. Override `PYTHON` if the server virtualenv is elsewhere.
 Native device and physical fall-sensor checks remain separate from browser tests.
+
+Pairing regression coverage also uses a third browser as the grandparent display:
+it verifies that video starts after controller acceptance, the display captures no
+camera or microphone, and disconnecting the display leaves the main call active.
+The display rejoins subsequent calls after reconnecting; automatic display reattachment
+to an ongoing call is not implemented.

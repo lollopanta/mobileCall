@@ -97,6 +97,40 @@ class AuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('session', api.call_sessions)
             emit.assert_awaited_once()
 
+    async def test_viewer_disconnect_preserves_main_call(self):
+        api.connected_users.update({sid: {'family_id': 1, 'name': sid, 'user_id': 1, 'role': 'grandparent'} for sid in ('caller', 'controller', 'viewer')})
+        api.call_sessions['paired'] = {'caller_sid': 'caller', 'controller_sid': 'controller', 'viewer_sid': 'viewer'}
+        with patch.object(api.sio, 'emit', new_callable=AsyncMock) as emit:
+            await api.handle_disconnect('viewer')
+            self.assertIn('paired', api.call_sessions)
+            self.assertIsNone(api.call_sessions['paired']['viewer_sid'])
+            self.assertNotIn('end-call', [call.args[0] for call in emit.await_args_list])
+            self.assertEqual(sum(call.args[0] == 'viewer-disconnected' for call in emit.await_args_list), 2)
+            await api.handle_disconnect('controller')
+            self.assertNotIn('paired', api.call_sessions)
+            self.assertIn('end-call', [call.args[0] for call in emit.await_args_list])
+
+    async def test_mirror_waits_for_controller_acceptance(self):
+        api.connected_users.update({sid: {'family_id': 1, 'name': sid, 'user_id': 1, 'role': 'grandparent'} for sid in ('caller', 'controller', 'viewer')})
+        session = {'caller_sid': 'caller', 'controller_sid': 'controller', 'viewer_sid': 'viewer'}
+        api.call_sessions['paired'] = session
+        offer = {'to': 'viewer', 'sessionId': 'paired', 'mirrorOnly': True,
+                 'isVideo': True, 'offer': {'type': 'offer', 'sdp': 'v=0\r\n'}}
+        with patch.object(api.sio, 'emit', new_callable=AsyncMock) as emit:
+            await api.handle_offer('caller', offer)
+            emit.assert_not_awaited()
+            await api.handle_answer('controller', {'to': 'caller', 'sessionId': 'paired',
+                                                  'answer': {'type': 'answer', 'sdp': 'v=0\r\n'}})
+            self.assertTrue(session['accepted'])
+            emit.reset_mock()
+            await api.handle_offer('caller', offer)
+            emit.assert_awaited_once()
+            self.assertEqual(emit.await_args.args[0], 'offer')
+            emit.reset_mock()
+            await api.handle_answer('viewer', {'to': 'caller', 'sessionId': 'paired',
+                                              'answer': {'type': 'answer', 'sdp': 'v=0\r\n'}})
+            self.assertEqual([call.args[0] for call in emit.await_args_list], ['answer'])
+
     async def test_json_requires_object(self):
         for payload in ([], None, "text"):
             with self.assertRaises(HTTPException) as raised:

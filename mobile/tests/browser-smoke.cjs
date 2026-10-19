@@ -62,10 +62,11 @@ async function instrument(page) {
 }
 async function hasMedia(page, video) {
   return page.evaluate(async video => {
-    const peer = window.__peers.findLast(p => p.connectionState === 'connected');
-    if (!peer) return false;
-    const reports = [...(await peer.getStats()).values()];
-    return ['audio', ...(video ? ['video'] : [])].every(kind => reports.some(r => r.type === 'inbound-rtp' && r.kind === kind && r.bytesReceived > 0));
+    for (const peer of window.__peers.filter(p => p.connectionState === 'connected')) {
+      const reports = [...(await peer.getStats()).values()];
+      if (['audio', ...(video ? ['video'] : [])].every(kind => reports.some(r => r.type === 'inbound-rtp' && r.kind === kind && r.bytesReceived > 0))) return true;
+    }
+    return false;
   }, video);
 }
 async function mediaReleased(page) {
@@ -96,21 +97,40 @@ async function mediaReleased(page) {
   await register(bob, baseUrl, 'browser-bob');
   console.log('PASS: registration and login for two isolated users');
   await alice.getByText('Family', { exact: true }).click();
-  await alice.getByPlaceholder('Family Name', { exact: true }).fill('Browser Test Family');
+  await alice.getByPlaceholder('Family Name', { exact: true }).fill('   ');
   await alice.getByText('Create New Family', { exact: true }).click();
+  await alice.getByText('Please enter a family name.', { exact: true }).waitFor();
+  await alice.getByPlaceholder('Family Name', { exact: true }).fill('Browser Test Family');
+  await alice.route('**/api/family/create', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ status: 'unsuccessful', message: 'Family creation is temporarily unavailable.' }) }));
+  await alice.getByText('Create New Family', { exact: true }).click();
+  await alice.getByText('Family creation is temporarily unavailable.', { exact: true }).waitFor();
+  assert.equal(await alice.getByPlaceholder('Family Name', { exact: true }).inputValue(), 'Browser Test Family');
+  await alice.unroute('**/api/family/create');
+  await alice.route('**/api/profile', route => route.abort('failed'));
+  await alice.getByText('Create New Family', { exact: true }).click();
+  await alice.getByText('Family created. The updated data could not be loaded. Please refresh.', { exact: true }).waitFor();
+  await alice.unroute('**/api/profile');
+  await alice.getByText('Refresh family data', { exact: true }).click();
   await until(() => alice.evaluate(() => Boolean(JSON.parse(localStorage.getItem('mobilecall_user_profile'))?.family_id)), 'family creation');
   const aliceToken = await alice.evaluate(() => localStorage.getItem('mobilecall_auth_token'));
   const invitation = await fetch(`${baseUrl}/api/family/invite`, { method: 'POST', headers: { Authorization: `Bearer ${aliceToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'browser-bob' }) });
   assert.equal(invitation.status, 200);
   await bob.getByText('Inbox', { exact: true }).click();
+  await bob.getByText('Select a role to enable Accept.', { exact: true }).waitFor();
+  assert.equal(await bob.getByRole('button', { name: 'Accept invitation', exact: true }).isDisabled(), true);
   await bob.getByText('Grandparent', { exact: true }).click();
+  await bob.route('**/api/notifications/respond', route => route.abort('failed'));
+  await bob.getByText('Accept', { exact: true }).click();
+  await bob.getByText('The server did not confirm the operation. Check your connection and refresh before trying again.', { exact: true }).waitFor();
+  assert.equal(await bob.getByRole('button', { name: 'Accept invitation', exact: true }).isEnabled(), true);
+  await bob.unroute('**/api/notifications/respond');
   await bob.getByText('Accept', { exact: true }).click();
   await until(() => bob.evaluate(() => Boolean(JSON.parse(localStorage.getItem('mobilecall_user_profile'))?.family_id)), 'invitation acceptance');
   await alice.getByText('Calls', { exact: true }).click();
   await bob.getByText('Calls', { exact: true }).click();
   await alice.getByLabel('Video call browser-bob', { exact: true }).waitFor();
   await bob.getByLabel('Video call browser-alice', { exact: true }).waitFor();
-  console.log('PASS: family creation, invitation acceptance and automatic presence');
+  console.log('PASS: family validation, server/network error feedback, explicit role, retry and automatic presence');
   for (const video of [true, false]) {
     await alice.evaluate(() => { window.__signals = []; });
     await alice.getByLabel(`${video ? 'Video call' : 'Call'} browser-bob`, { exact: true }).click();
@@ -134,6 +154,57 @@ async function mediaReleased(page) {
   await bob.getByLabel('Decline call', { exact: true }).click();
   await alice.getByText('Online Family Members', { exact: true }).waitFor();
   await until(async () => (await mediaReleased(alice)) && (await mediaReleased(bob)), 'declined call cleanup');
+  const viewerContext = await browser.newContext({ permissions: ['camera', 'microphone'], viewport: { width: 1100, height: 850 } });
+  const viewer = await viewerContext.newPage();
+  await instrument(viewer);
+  viewer.on('pageerror', error => errors.push(error.message));
+  const bobSession = await bob.evaluate(() => ({
+    token: localStorage.getItem('mobilecall_auth_token'),
+    profile: localStorage.getItem('mobilecall_user_profile'),
+    device: localStorage.getItem('mobilecall_device_id'),
+  }));
+  const headers = { Authorization: `Bearer ${bobSession.token}`, 'Content-Type': 'application/json' };
+  const pairing = await fetch(`${baseUrl}/api/device-pairing/start`, {
+    method: 'POST', headers, body: JSON.stringify({ device_id: 'browser-viewer' }),
+  });
+  assert.equal(pairing.status, 200);
+  const pairingData = await pairing.json();
+  const joined = await fetch(`${baseUrl}/api/device-pairing/join`, {
+    method: 'POST', headers, body: JSON.stringify({ device_id: bobSession.device, pairing_code: pairingData.pairing.pairing_code }),
+  });
+  assert.equal(joined.status, 200);
+  await viewer.goto(baseUrl);
+  await viewer.evaluate(({ token, profile, baseUrl }) => {
+    localStorage.setItem('mobilecall_auth_token', token);
+    localStorage.setItem('mobilecall_user_profile', profile);
+    localStorage.setItem('mobilecall_device_id', 'browser-viewer');
+    localStorage.setItem('mobilecall_server_url', baseUrl);
+  }, { ...bobSession, baseUrl });
+  await viewer.reload();
+  await bob.reload();
+  await bob.getByText('Online Family Members', { exact: true }).waitFor();
+  await viewer.getByText('Online Family Members', { exact: true }).waitFor();
+  await alice.getByLabel('Video call browser-bob', { exact: true }).click();
+  await bob.getByLabel('Accept call', { exact: true }).waitFor();
+  await delay(1000);
+  assert.equal(await viewer.evaluate(() => window.__peers.length), 0, 'Display must wait for controller acceptance');
+  await bob.getByLabel('Accept call', { exact: true }).click();
+  await until(async () => (await hasMedia(alice, true)) && (await hasMedia(bob, true)), 'paired main call RTP', 30000);
+  await until(() => viewer.evaluate(async () => {
+    for (const peer of window.__peers) {
+      const stats = [...(await peer.getStats()).values()];
+      if (stats.some(r => r.type === 'inbound-rtp' && r.kind === 'video' && r.bytesReceived > 0)) return true;
+    }
+    return false;
+  }), 'paired viewer video RTP', 30000);
+  assert.equal(await viewer.evaluate(() => window.__streams.length), 0, 'Display must not capture camera or microphone');
+  await viewerContext.close();
+  await delay(1500);
+  assert.equal(await hasMedia(alice, true), true);
+  assert.equal(await hasMedia(bob, true), true);
+  await alice.getByLabel('End call', { exact: true }).click();
+  await bob.getByText('Online Family Members', { exact: true }).waitFor();
+  console.log('PASS: paired display video, acceptance gating, no capture, main call survives display disconnect');
   await alice.getByLabel('Log out', { exact: true }).click();
   await alice.getByText('LOGIN', { exact: true }).waitFor();
   assert.equal(await alice.evaluate(() => localStorage.getItem('mobilecall_auth_token')), null);

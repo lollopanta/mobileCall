@@ -83,7 +83,7 @@ For mobile clients connecting to this server:
 *   Ensure the `socket.io-client` version matches the server requirements.
 *   The server listens on **Port 3000**.
 *   The signaling path is default (`/socket.io/`).
-*   **Transport restriction**: Use `transports: ['websocket']` for maximum stability.
+*   **Transport fallback**: The mobile client tries WebSocket first and enables `tryAllTransports` to fall back to HTTP polling when WebSocket is unavailable.
 
 ---
 
