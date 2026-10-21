@@ -144,3 +144,11 @@ The APK bundles JavaScript and works without Metro. It uses the generated
 **development signing key**, suitable for direct installation; configure your own
 production signing before publishing to a store. The signaling server must still
 be running and reachable from the phone using the app's connection settings.
+
+## iOS / TestFlight with GitHub Actions (no EAS)
+
+[Build iOS and TestFlight](https://github.com/lollopanta/mobileCall/actions/workflows/build-ios.yml)
+builds with Xcode on GitHub-hosted macOS runners. Select `simulator` to validate
+without Apple credentials, or `testflight` to sign and upload to App Store Connect.
+The TestFlight mode needs an Apple Developer membership and six repository secrets;
+see [the setup guide](mobile/TESTFLIGHT.md). No Expo account or EAS is used.

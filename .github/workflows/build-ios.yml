@@ -1,0 +1,139 @@
+name: Build iOS and TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      destination:
+        description: Build for TestFlight or validate without Apple credentials
+        type: choice
+        options: [testflight, simulator]
+        default: testflight
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+      DESTINATION: ${{ inputs.destination }}
+      IOS_BUNDLE_IDENTIFIER: ${{ vars.IOS_BUNDLE_IDENTIFIER || 'com.anonymous.mobilecall' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check Apple credentials
+        if: inputs.destination == 'testflight'
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROFILE_BASE64: ${{ secrets.IOS_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          for name in IOS_CERTIFICATE_BASE64 IOS_CERTIFICATE_PASSWORD IOS_PROFILE_BASE64 ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub secret: $name. See mobile/TESTFLIGHT.md."
+              exit 1
+            fi
+          done
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.14.1'
+      - name: Prepare app
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm run typecheck
+          pnpm run test:security
+          pnpm exec expo install --check
+          node scripts/configure-ios-ci.cjs
+          pnpm exec expo prebuild --clean --platform ios --no-install
+          xcodebuild -version
+          pod --version
+          cd ios
+          pod install
+      - name: Build simulator app without signing
+        if: inputs.destination == 'simulator'
+        run: |
+          set -o pipefail
+          xcodebuild -workspace ios/MobileCall.xcworkspace -scheme MobileCall \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/ios-derived/Build/Products/Release-iphonesimulator/MobileCall.app" \
+            artifacts/MobileCall-simulator.zip
+      - name: Install signing credentials
+        if: inputs.destination == 'testflight'
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROFILE_BASE64: ${{ secrets.IOS_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: bash scripts/install-ios-signing.sh
+      - name: Archive and export IPA
+        if: inputs.destination == 'testflight'
+        run: |
+          set -o pipefail
+          xcodebuild -workspace ios/MobileCall.xcworkspace -scheme MobileCall \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/MobileCall.xcarchive" \
+            archive 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/MobileCall.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath artifacts
+          codesign --verify --deep --strict "$RUNNER_TEMP/MobileCall.xcarchive/Products/Applications/MobileCall.app"
+      - name: Save build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: MobileCall-iOS-${{ inputs.destination }}
+          path: |
+            mobile/artifacts/*.ipa
+            mobile/artifacts/*simulator.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload IPA to App Store Connect
+        if: inputs.destination == 'testflight'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          API_PRIVATE_KEYS_DIR: ${{ runner.temp }}/asc-keys
+        run: |
+          xcrun altool --upload-app --type ios --file artifacts/MobileCall.ipa \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo '### Uploaded to App Store Connect' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Wait for Apple processing, then assign this build to TestFlight testers. External testing may require Beta App Review.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Save build log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iOS-build-log
+          path: ${{ runner.temp }}/ios-build.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove signing credentials
+        if: always() && inputs.destination == 'testflight'
+        run: |
+          if [ -f "$RUNNER_TEMP/mobilecall-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/mobilecall-signing.keychain-db"
+          fi
+          rm -rf "$RUNNER_TEMP/asc-keys"
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/profile.mobileprovision" "$RUNNER_TEMP/profile.plist"
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/mobilecall-ci.mobileprovision"
+          rm -f "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/mobilecall-ci.mobileprovision"
