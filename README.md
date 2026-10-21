@@ -128,3 +128,19 @@ it verifies that video starts after controller acceptance, the display captures 
 camera or microphone, and disconnecting the display leaves the main call active.
 The display rejoins subsequent calls after reconnecting; automatic display reattachment
 to an ongoing call is not implemented.
+
+## Android APK with GitHub Actions (no EAS)
+
+Open [Build Android APK](https://github.com/lollopanta/mobileCall/actions/workflows/build-apk.yml)
+and select **Run workflow**, or push changes under `mobile/` to `master`.
+Pull requests affecting the app also build an APK. Everything runs on GitHub's
+Ubuntu runners with Node 24, JDK 17, Expo prebuild and Gradle `assembleRelease`;
+no Expo login, EAS account, or repository secrets are required.
+
+After a successful run, download **MobileCall-APK** from **Artifacts** and extract
+`MobileCall-<commit>.apk`. The archive also includes `SHA256SUMS.txt`.
+Artifacts expire after 14 days; rerun the workflow to generate them again.
+The APK bundles JavaScript and works without Metro. It uses the generated
+**development signing key**, suitable for direct installation; configure your own
+production signing before publishing to a store. The signaling server must still
+be running and reachable from the phone using the app's connection settings.

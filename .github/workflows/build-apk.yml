@@ -1,0 +1,95 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/build-apk.yml'
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.14.1'
+
+      - name: Enable pnpm from packageManager
+        run: corepack enable
+
+      - name: Set up Java
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check TypeScript and security regressions
+        run: |
+          pnpm run typecheck
+          pnpm run test:security
+          pnpm exec expo install --check
+
+      - name: Generate Android project
+        run: pnpm exec expo prebuild --clean --platform android --no-install
+
+      - name: Build standalone release APK
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2
+
+      - name: Verify and prepare APK
+        run: |
+          mkdir -p artifacts
+          apk="android/app/build/outputs/apk/release/app-release.apk"
+          unzip -t "$apk" >/dev/null
+          apksigner_path="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+          "$apksigner_path" verify --verbose --print-certs "$apk"
+          cp "$apk" "artifacts/MobileCall-${GITHUB_SHA:0:7}.apk"
+          cd artifacts
+          sha256sum ./*.apk > SHA256SUMS.txt
+          {
+            echo '### MobileCall APK'
+            echo 'Download the MobileCall-APK artifact below and extract the APK.'
+            echo 'Standalone release build for all default Android architectures; no Expo account or Metro server required.'
+            echo 'Signed with the generated development key, for direct installation. Store distribution requires production signing.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: MobileCall-APK
+          path: mobile/artifacts/
+          if-no-files-found: error
+          retention-days: 14
