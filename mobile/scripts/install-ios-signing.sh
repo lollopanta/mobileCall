@@ -27,6 +27,10 @@ for directory in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Libra
   cp "$RUNNER_TEMP/profile.mobileprovision" "$directory/mobilecall-ci.mobileprovision"
 done
 
+# CocoaPods may use a different Ruby than the runner's default executable.
+if ! ruby -e "require 'xcodeproj'" 2>/dev/null; then
+  gem install --user-install xcodeproj --no-document
+fi
 ruby <<'RUBY'
 require 'xcodeproj'
 require 'json'
