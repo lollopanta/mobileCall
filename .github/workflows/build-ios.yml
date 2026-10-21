@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       destination:
-        description: Build for TestFlight or validate without Apple credentials
+        description: Build for TestFlight, unsigned iPhone IPA, or simulator
         type: choice
-        options: [testflight, simulator]
-        default: testflight
+        options: [unsigned, testflight, simulator]
+        default: unsigned
         required: true
 
 permissions:
@@ -78,6 +78,27 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "$RUNNER_TEMP/ios-derived/Build/Products/Release-iphonesimulator/MobileCall.app" \
             artifacts/MobileCall-simulator.zip
+      - name: Build unsigned IPA for iPhone
+        if: inputs.destination == 'unsigned'
+        run: |
+          set -o pipefail
+          xcodebuild -workspace ios/MobileCall.xcworkspace -scheme MobileCall \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build \
+            2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+          app_path="$RUNNER_TEMP/ios-derived/Build/Products/Release-iphoneos/MobileCall.app"
+          test -f "$app_path/main.jsbundle"
+          xcrun lipo -verify_arch arm64 "$app_path/MobileCall"
+          mkdir -p "$RUNNER_TEMP/unsigned-ipa/Payload" artifacts
+          ditto "$app_path" "$RUNNER_TEMP/unsigned-ipa/Payload/MobileCall.app"
+          ditto -c -k --norsrc --keepParent "$RUNNER_TEMP/unsigned-ipa/Payload" artifacts/MobileCall-unsigned.ipa
+          unzip -t artifacts/MobileCall-unsigned.ipa >/dev/null
+          cd artifacts
+          shasum -a 256 MobileCall-unsigned.ipa > SHA256SUMS.txt
+          echo '### Unsigned iPhone IPA' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Download MobileCall-iOS-unsigned and sign/install the IPA using AltStore Classic. This is an iPhone device build, not a simulator build or a TestFlight upload.' >> "$GITHUB_STEP_SUMMARY"
       - name: Install signing credentials
         if: inputs.destination == 'testflight'
         env:
@@ -105,6 +126,7 @@ jobs:
           name: MobileCall-iOS-${{ inputs.destination }}
           path: |
             mobile/artifacts/*.ipa
+            mobile/artifacts/SHA256SUMS.txt
             mobile/artifacts/*simulator.zip
           if-no-files-found: error
           retention-days: 14

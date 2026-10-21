@@ -148,7 +148,7 @@ be running and reachable from the phone using the app's connection settings.
 ## iOS / TestFlight with GitHub Actions (no EAS)
 
 [Build iOS and TestFlight](https://github.com/lollopanta/mobileCall/actions/workflows/build-ios.yml)
-builds with Xcode on GitHub-hosted macOS runners. Select `simulator` to validate
-without Apple credentials, or `testflight` to sign and upload to App Store Connect.
+builds with Xcode on GitHub-hosted macOS runners. Select `unsigned` for an iPhone IPA to sign/install with AltStore Classic,
+`simulator` to validate without signing, or `testflight` to sign and upload to App Store Connect.
 The TestFlight mode needs an Apple Developer membership and six repository secrets;
 see [the setup guide](mobile/TESTFLIGHT.md). No Expo account or EAS is used.

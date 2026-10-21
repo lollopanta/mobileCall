@@ -54,6 +54,12 @@ termine. I materiali di firma non sono inclusi negli artifact.
 
 Actions → **Build iOS and TestFlight** → **Run workflow**:
 
+- **unsigned** (predefinito): compila in Release per iPhone ARM64 con firma
+  disabilitata e crea `MobileCall-unsigned.ipa` con checksum SHA-256. Non richiede
+  secrets Apple. Scarica l’artifact **MobileCall-iOS-unsigned**, estrai l’IPA e
+  firmalo/installalo con AltStore Classic e AltServer sul tuo computer. Con un
+  Apple ID gratuito la firma va rinnovata ogni 7 giorni. L’IPA senza firma non
+  si installa direttamente toccando il file e non si carica su TestFlight.
 - **testflight**: controlla i sei secrets, genera un archivio firmato, esporta
   l'IPA e lo invia ad App Store Connect. Numero build: `<numero run>.<tentativo>`,
   distinto anche per i retry. Se esistono build con numeri maggiori caricate da
